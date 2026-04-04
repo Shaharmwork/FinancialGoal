@@ -1,0 +1,66 @@
+@import 'tailwindcss';
+
+:root {
+  --background: oklch(0.97 0.01 85);
+  --foreground: oklch(0.28 0.03 35);
+  --card: oklch(0.99 0.005 85);
+  --border: oklch(0.9 0.015 75);
+  --muted: oklch(0.94 0.012 80);
+  --muted-foreground: oklch(0.52 0.03 40);
+  --primary: oklch(0.61 0.11 40);
+  --primary-foreground: oklch(0.99 0.01 85);
+}
+
+@theme inline {
+  --font-sans:
+    "Instrument Sans",
+    "Avenir Next",
+    "Segoe UI",
+    sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    min-height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    background-image:
+      radial-gradient(circle at top left, rgba(255, 216, 107, 0.32), transparent 30%),
+      radial-gradient(circle at top right, rgba(136, 201, 255, 0.24), transparent 26%),
+      radial-gradient(circle at bottom right, rgba(201, 188, 255, 0.18), transparent 28%),
+      linear-gradient(180deg, rgba(255, 252, 245, 0.96), rgba(247, 242, 232, 1));
+    min-height: 100vh;
+  }
+
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
+
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .screen-panel-active {
+    display: block;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 30%, white);
+  }
+}
