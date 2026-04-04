@@ -16,19 +16,23 @@ export function Dashboard({ entries, monthlySummaries, settings }: DashboardProp
   const year = getCurrentYearStats(entries, monthlySummaries, settings)
   const now = new Date()
   const greeting = getGreeting(now)
-  const projectedProfit = year.projectedProfit
+  const projectedProfit = year.projectedAnnualProfit
   const gapToGoal =
-    projectedProfit === undefined ? undefined : Math.max(0, year.goalProfit - projectedProfit)
-  const amountAhead =
-    projectedProfit === undefined ? undefined : Math.max(0, projectedProfit - year.goalProfit)
-  const goalProgress =
-    projectedProfit === undefined || year.goalProfit <= 0
+    projectedProfit === undefined
       ? undefined
-      : Math.min(100, (projectedProfit / year.goalProfit) * 100)
+      : Math.max(0, year.goalAnnualBusinessProfit - projectedProfit)
+  const amountAhead =
+    projectedProfit === undefined
+      ? undefined
+      : Math.max(0, projectedProfit - year.goalAnnualBusinessProfit)
+  const goalProgress =
+    projectedProfit === undefined || year.goalAnnualBusinessProfit <= 0
+      ? undefined
+      : Math.min(100, (projectedProfit / year.goalAnnualBusinessProfit) * 100)
   const monthsRemaining = Math.max(1, 12 - now.getMonth())
   const neededMonthlyAverage =
     gapToGoal === undefined || gapToGoal <= 0 ? 0 : gapToGoal / monthsRemaining
-  const status = getTargetStatus(projectedProfit, year.goalProfit)
+  const status = getTargetStatus(projectedProfit, year.goalAnnualBusinessProfit)
   const effortLabel = getEffortLabel(neededMonthlyAverage, projectedProfit)
 
   return (
@@ -64,13 +68,29 @@ export function Dashboard({ entries, monthlySummaries, settings }: DashboardProp
 
       <section className="grid grid-cols-2 gap-3">
         <article className="rounded-[1.8rem] border border-border bg-card p-4 shadow-sm">
-          <div className="text-sm font-semibold text-foreground">Move to tax piggy</div>
-          <p className="mt-3 text-2xl font-semibold text-foreground">
-            {month.reserveProjection === undefined ? '—' : formatCurrency(month.reserveProjection)}
-          </p>
-          <p className="mt-2 text-xs leading-5 text-muted-foreground">
-            Based on invoiced profit pace, estimated tax, and buffer.
-          </p>
+          <div className="text-sm font-semibold text-foreground">Tax planning</div>
+          <div className="mt-3 space-y-2 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <span className="max-w-[11rem] text-muted-foreground">
+                Reserved Tax amount so far from previous months
+              </span>
+              <span className="font-semibold text-foreground">
+                {month.reservedTaxFromPreviousMonths === undefined
+                  ? '—'
+                  : formatCurrency(month.reservedTaxFromPreviousMonths)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="max-w-[11rem] text-muted-foreground">
+                Forecast calculated tax to save this month
+              </span>
+              <span className="font-semibold text-foreground">
+                {month.forecastCalculatedTaxToSaveThisMonth === undefined
+                  ? '—'
+                  : formatCurrency(month.forecastCalculatedTaxToSaveThisMonth)}
+              </span>
+            </div>
+          </div>
         </article>
 
         <article className="rounded-[1.8rem] border border-border bg-card p-4 shadow-sm">
@@ -98,7 +118,7 @@ export function Dashboard({ entries, monthlySummaries, settings }: DashboardProp
             <p className="mt-1 text-xs text-muted-foreground">Uses invoiced income, not paid cash.</p>
           </div>
           <span className="rounded-full bg-muted px-3 py-1 text-[11px] font-medium text-muted-foreground">
-            Goal {formatCurrency(year.goalProfit)}
+            Goal {formatCurrency(year.goalAnnualBusinessProfit)}
           </span>
         </div>
 
@@ -114,7 +134,7 @@ export function Dashboard({ entries, monthlySummaries, settings }: DashboardProp
                 monthsRemaining,
                 neededMonthlyAverage,
                 projectedProfit,
-                goal: year.goalProfit,
+                goal: year.goalAnnualBusinessProfit,
               })}
             </p>
           </div>
@@ -129,7 +149,9 @@ export function Dashboard({ entries, monthlySummaries, settings }: DashboardProp
         <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
           <div className="rounded-[1.35rem] bg-muted/75 px-3 py-3">
             <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Goal</div>
-            <div className="mt-2 font-semibold text-foreground">{formatCurrency(year.goalProfit)}</div>
+            <div className="mt-2 font-semibold text-foreground">
+              {formatCurrency(year.goalAnnualBusinessProfit)}
+            </div>
           </div>
           <div className="rounded-[1.35rem] bg-muted/75 px-3 py-3">
             <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Gap</div>

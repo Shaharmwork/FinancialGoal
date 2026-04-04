@@ -1,3 +1,4 @@
+import { estimateAnnualTaxFor2026, estimateRequiredAnnualBusinessProfitForTargetNet2026 } from './tax-engine'
 import type { DailyEntry, MonthlySummary, Settings } from './types'
 
 function roundCurrency(value: number) {
@@ -45,13 +46,6 @@ export function getCurrentMonthRange(today = new Date()) {
   }
 }
 
-export function getCurrentYearRange(today = new Date()) {
-  return {
-    start: new Date(today.getFullYear(), 0, 1),
-    end: new Date(today.getFullYear(), 11, 31),
-  }
-}
-
 export function filterEntriesByRange(entries: DailyEntry[], start: Date, end: Date) {
   const startKey = toDateKey(start)
   const endKey = toDateKey(end)
@@ -64,37 +58,13 @@ function sumEntries(entries: DailyEntry[], field: EntryField) {
   return entries.reduce((total, entry) => total + entry[field], 0)
 }
 
-function getDefaultHourlyRate(settings: Settings) {
-  if (settings.defaultShiftHours <= 0) {
-    return 0
-  }
-
-  return settings.defaultShiftIncome / settings.defaultShiftHours
+function getMonthProgress(today: Date, endOfMonth: Date) {
+  return today.getDate() / endOfMonth.getDate()
 }
 
-function getTaxRate(settings: Settings) {
-  return Math.max(0, settings.incomeTaxPercent + settings.additionalTaxPercent) / 100
-}
 
-function getTaxFromProfit(profit: number, settings: Settings) {
-  return roundCurrency(Math.max(0, profit) * getTaxRate(settings))
-}
-
-function getReserveTarget(taxAmount: number, settings: Settings) {
-  const bufferMultiplier = 1 + Math.max(0, settings.reserveBufferPercent) / 100
-  return roundCurrency(Math.max(0, taxAmount) * bufferMultiplier)
-}
-
-function getMonthProgress(today: Date, monthEnd: Date) {
-  return today.getDate() / monthEnd.getDate()
-}
-
-function getElapsedYearMonths(today: Date, monthEnd: Date) {
-  return today.getMonth() + getMonthProgress(today, monthEnd)
-}
-
-function getUniqueWorkDays(entries: DailyEntry[]) {
-  return new Set(entries.filter((entry) => entry.hours > 0).map((entry) => entry.date)).size
+function getElapsedYearMonths(today: Date, endOfMonth: Date) {
+  return today.getMonth() + getMonthProgress(today, endOfMonth)
 }
 
 function countWeekdays(start: Date, end: Date) {
@@ -112,6 +82,10 @@ function countWeekdays(start: Date, end: Date) {
   return count
 }
 
+function getUniqueWorkDays(entries: DailyEntry[]) {
+  return new Set(entries.filter((entry) => entry.hours > 0).map((entry) => entry.date)).size
+}
+
 function projectFromPace(actualValue: number, progress: number) {
   if (actualValue > 0 && progress > 0) {
     return actualValue / progress
@@ -120,19 +94,26 @@ function projectFromPace(actualValue: number, progress: number) {
   return undefined
 }
 
-function getMonthKeysUpToCurrentMonth(today: Date) {
-  return Array.from({ length: today.getMonth() + 1 }, (_, index) => {
-    return `${today.getFullYear()}-${pad(index + 1)}`
+function projectFromPaceOrZero(actualValue: number, progress: number) {
+  if (progress <= 0) {
+    return 0
+  }
+
+  return actualValue > 0 ? actualValue / progress : 0
+}
+
+function getGoalAnnualBusinessProfit(settings: Settings) {
+  return estimateRequiredAnnualBusinessProfitForTargetNet2026({
+    targetAnnualNet: settings.targetNetMonth * 12,
+    qualifiesForSelfEmployedDeduction: settings.qualifiesForSelfEmployedDeduction,
   })
 }
 
-function getMonthKeysBeforeCurrentMonth(today: Date) {
-  return Array.from({ length: today.getMonth() }, (_, index) => {
-    return `${today.getFullYear()}-${pad(index + 1)}`
-  })
+function getReserveTarget(estimatedAnnualTax: number, settings: Settings) {
+  return estimatedAnnualTax * (1 + Math.max(0, settings.reserveBufferPercent) / 100)
 }
 
-interface Totals {
+interface BusinessTotals {
   hours: number
   invoicedIncome: number
   paidIncome: number
@@ -140,7 +121,7 @@ interface Totals {
   profit: number
 }
 
-function createEmptyTotals(): Totals {
+function createEmptyBusinessTotals(): BusinessTotals {
   return {
     hours: 0,
     invoicedIncome: 0,
@@ -150,23 +131,23 @@ function createEmptyTotals(): Totals {
   }
 }
 
-function toTotals(source: {
+function toBusinessTotals(input: {
   hours: number
   invoicedIncome: number
   paidIncome: number
   expenses: number
-}) {
+}): BusinessTotals {
   return {
-    hours: source.hours,
-    invoicedIncome: source.invoicedIncome,
-    paidIncome: source.paidIncome,
-    expenses: source.expenses,
-    profit: source.invoicedIncome - source.expenses,
+    hours: input.hours,
+    invoicedIncome: input.invoicedIncome,
+    paidIncome: input.paidIncome,
+    expenses: input.expenses,
+    profit: input.invoicedIncome - input.expenses,
   }
 }
 
-function addTotals(left: Totals, right: Totals) {
-  return toTotals({
+function combineBusinessTotals(left: BusinessTotals, right: BusinessTotals) {
+  return toBusinessTotals({
     hours: left.hours + right.hours,
     invoicedIncome: left.invoicedIncome + right.invoicedIncome,
     paidIncome: left.paidIncome + right.paidIncome,
@@ -174,7 +155,7 @@ function addTotals(left: Totals, right: Totals) {
   })
 }
 
-function hasTotalsData(totals: Totals) {
+function hasBusinessData(totals: BusinessTotals) {
   return (
     totals.hours > 0 ||
     totals.invoicedIncome > 0 ||
@@ -183,10 +164,16 @@ function hasTotalsData(totals: Totals) {
   )
 }
 
-function getEntryMonthTotals(entries: DailyEntry[], monthKey: string) {
+function getMonthKeysUntilCurrentMonth(today: Date) {
+  return Array.from({ length: today.getMonth() + 1 }, (_, index) => {
+    return `${today.getFullYear()}-${pad(index + 1)}`
+  })
+}
+
+function getMonthTotalsFromEntries(entries: DailyEntry[], monthKey: string) {
   const monthEntries = entries.filter((entry) => entry.date.slice(0, 7) === monthKey)
 
-  return toTotals({
+  return toBusinessTotals({
     hours: sumEntries(monthEntries, 'hours'),
     invoicedIncome: sumEntries(monthEntries, 'invoicedIncome'),
     paidIncome: sumEntries(monthEntries, 'paidIncome'),
@@ -199,37 +186,73 @@ function getMonthTotals(
   monthlySummaries: MonthlySummary[],
   monthKey: string,
 ) {
-  const manualSummary = monthlySummaries.find((summary) => summary.monthKey === monthKey)
+  const monthlySummary = monthlySummaries.find((summary) => summary.monthKey === monthKey)
 
-  if (manualSummary) {
-    return toTotals(manualSummary)
+  if (monthlySummary) {
+    return toBusinessTotals(monthlySummary)
   }
 
-  return getEntryMonthTotals(entries, monthKey)
+  return getMonthTotalsFromEntries(entries, monthKey)
 }
 
-function getTotalsForMonthKeys(
+function getTotalsForMonths(
   entries: DailyEntry[],
   monthlySummaries: MonthlySummary[],
   monthKeys: string[],
 ) {
   return monthKeys.reduce((combined, monthKey) => {
-    return addTotals(combined, getMonthTotals(entries, monthlySummaries, monthKey))
-  }, createEmptyTotals())
+    return combineBusinessTotals(combined, getMonthTotals(entries, monthlySummaries, monthKey))
+  }, createEmptyBusinessTotals())
 }
 
-function getGoalAnnualNet(settings: Settings) {
-  return roundCurrency(settings.monthlyNetGoal * 12)
-}
-
-function getGoalAnnualProfit(settings: Settings) {
-  const taxRate = getTaxRate(settings)
-
-  if (taxRate >= 0.95) {
-    return getGoalAnnualNet(settings)
+function getAnnualReserveModel(
+  totals: BusinessTotals,
+  yearProgress: number,
+  settings: Settings,
+) {
+  if (!hasBusinessData(totals) || yearProgress <= 0) {
+    return undefined
   }
 
-  return roundCurrency(getGoalAnnualNet(settings) / (1 - taxRate))
+  const annualBusinessIncome = projectFromPaceOrZero(totals.invoicedIncome, yearProgress)
+  const annualBusinessExpenses = projectFromPaceOrZero(totals.expenses, yearProgress)
+  const annualTaxEstimate = estimateAnnualTaxFor2026({
+    annualBusinessIncome,
+    annualBusinessExpenses,
+    qualifiesForSelfEmployedDeduction: settings.qualifiesForSelfEmployedDeduction,
+  })
+
+  return {
+    annualBusinessIncome,
+    annualBusinessExpenses,
+    projectedAnnualProfit: annualBusinessIncome - annualBusinessExpenses,
+    estimatedAnnualTax: annualTaxEstimate.estimatedAnnualTax,
+    projectedAnnualNet: annualTaxEstimate.projectedAnnualNet,
+    projectedMonthlyNet: annualTaxEstimate.projectedMonthlyNet,
+    annualReserveTarget: getReserveTarget(annualTaxEstimate.estimatedAnnualTax, settings),
+  }
+}
+
+function projectCurrentMonthTotals(
+  currentMonthTotals: BusinessTotals,
+  currentMonthProgress: number,
+) {
+  if (!hasBusinessData(currentMonthTotals) || currentMonthProgress <= 0) {
+    return createEmptyBusinessTotals()
+  }
+
+  return toBusinessTotals({
+    hours: projectFromPaceOrZero(currentMonthTotals.hours, currentMonthProgress),
+    invoicedIncome: projectFromPaceOrZero(currentMonthTotals.invoicedIncome, currentMonthProgress),
+    paidIncome: projectFromPaceOrZero(currentMonthTotals.paidIncome, currentMonthProgress),
+    expenses: projectFromPaceOrZero(currentMonthTotals.expenses, currentMonthProgress),
+  })
+}
+
+function getPreviousMonthKeys(today: Date) {
+  return Array.from({ length: today.getMonth() }, (_, index) => {
+    return `${today.getFullYear()}-${pad(index + 1)}`
+  })
 }
 
 export interface WeekStats {
@@ -246,21 +269,21 @@ export interface MonthStats {
   expenses: number
   profit: number
   cashOutstanding: number
-  reserveProjection?: number
-  reserveTargetToDate?: number
-  reserveGapToDate?: number
+  reservedTaxFromPreviousMonths?: number
+  forecastCalculatedTaxToSaveThisMonth?: number
 }
 
 export interface YearStats {
-  goalProfit: number
-  goalNet: number
+  goalAnnualBusinessProfit: number
+  goalAnnualNet: number
   ytdInvoicedIncome: number
   ytdPaidIncome: number
   ytdExpenses: number
   ytdProfit: number
-  projectedProfit?: number
-  projectedTax?: number
-  projectedNet?: number
+  projectedAnnualProfit?: number
+  estimatedAnnualTax?: number
+  projectedAnnualNet?: number
+  projectedMonthlyNet?: number
   annualReserveTarget?: number
 }
 
@@ -280,10 +303,10 @@ export function getCurrentWeekStats(
   const projectedHours = actualHours + remainingWeekdays * dailyHoursEstimate
 
   return {
-    goalHours: roundHours(settings.weeklyHoursGoal),
+    goalHours: roundHours(settings.weeklyHoursTarget),
     actualHours: roundHours(actualHours),
     projectedHours: weekEntries.length > 0 ? roundHours(projectedHours) : undefined,
-    hoursLeft: roundHours(Math.max(0, settings.weeklyHoursGoal - actualHours)),
+    hoursLeft: roundHours(Math.max(0, settings.weeklyHoursTarget - actualHours)),
   }
 }
 
@@ -296,30 +319,38 @@ export function getCurrentYearStats(
   const currentMonthEnd = getCurrentMonthRange(today).end
   const elapsedYearMonths = Math.max(getElapsedYearMonths(today, currentMonthEnd), 1 / 12)
   const yearProgress = Math.min(1, elapsedYearMonths / 12)
-  const monthKeys = getMonthKeysUpToCurrentMonth(today)
-  const ytdTotals = getTotalsForMonthKeys(entries, monthlySummaries, monthKeys)
-  const hasYearData = hasTotalsData(ytdTotals)
-  const projectedProfit =
-    !hasYearData ? undefined : projectFromPace(ytdTotals.profit, yearProgress)
-  const projectedTax =
-    projectedProfit === undefined ? undefined : getTaxFromProfit(projectedProfit, settings)
-  const projectedNet =
-    projectedProfit === undefined || projectedTax === undefined
-      ? undefined
-      : projectedProfit - projectedTax
+  const monthKeys = getMonthKeysUntilCurrentMonth(today)
+  const yearToDateTotals = getTotalsForMonths(entries, monthlySummaries, monthKeys)
+  const hasYearData = hasBusinessData(yearToDateTotals)
+  const annualReserveModel = getAnnualReserveModel(yearToDateTotals, yearProgress, settings)
 
   return {
-    goalProfit: getGoalAnnualProfit(settings),
-    goalNet: getGoalAnnualNet(settings),
-    ytdInvoicedIncome: roundCurrency(ytdTotals.invoicedIncome),
-    ytdPaidIncome: roundCurrency(ytdTotals.paidIncome),
-    ytdExpenses: roundCurrency(ytdTotals.expenses),
-    ytdProfit: roundCurrency(ytdTotals.profit),
-    projectedProfit: projectedProfit === undefined ? undefined : roundCurrency(projectedProfit),
-    projectedTax: projectedTax === undefined ? undefined : roundCurrency(projectedTax),
-    projectedNet: projectedNet === undefined ? undefined : roundCurrency(projectedNet),
+    goalAnnualBusinessProfit: getGoalAnnualBusinessProfit(settings),
+    goalAnnualNet: roundCurrency(settings.targetNetMonth * 12),
+    ytdInvoicedIncome: roundCurrency(yearToDateTotals.invoicedIncome),
+    ytdPaidIncome: roundCurrency(yearToDateTotals.paidIncome),
+    ytdExpenses: roundCurrency(yearToDateTotals.expenses),
+    ytdProfit: roundCurrency(yearToDateTotals.profit),
+    projectedAnnualProfit:
+      !hasYearData || annualReserveModel === undefined
+        ? undefined
+        : roundCurrency(annualReserveModel.projectedAnnualProfit),
+    estimatedAnnualTax:
+      annualReserveModel === undefined
+        ? undefined
+        : roundCurrency(annualReserveModel.estimatedAnnualTax),
+    projectedAnnualNet:
+      annualReserveModel === undefined
+        ? undefined
+        : roundCurrency(annualReserveModel.projectedAnnualNet),
+    projectedMonthlyNet:
+      annualReserveModel === undefined
+        ? undefined
+        : roundCurrency(annualReserveModel.projectedMonthlyNet),
     annualReserveTarget:
-      projectedTax === undefined ? undefined : getReserveTarget(projectedTax, settings),
+      annualReserveModel === undefined
+        ? undefined
+        : roundCurrency(annualReserveModel.annualReserveTarget),
   }
 }
 
@@ -329,37 +360,40 @@ export function getCurrentMonthStats(
   settings: Settings,
   today = new Date(),
 ): MonthStats {
-  const currentMonthKey = toMonthKey(today)
-  const currentMonthEnd = getCurrentMonthRange(today).end
-  const currentMonthTotals = getMonthTotals(entries, monthlySummaries, currentMonthKey)
-  const year = getCurrentYearStats(entries, monthlySummaries, settings, today)
-  const elapsedYearProgress = Math.min(1, getElapsedYearMonths(today, currentMonthEnd) / 12)
-  const monthEndYearProgress = Math.min(1, (today.getMonth() + 1) / 12)
-  const totalsBeforeCurrentMonth = getTotalsForMonthKeys(
-    entries,
-    monthlySummaries,
-    getMonthKeysBeforeCurrentMonth(today),
-  )
-  const reserveBasisBeforeCurrentMonth = getReserveTarget(
-    getTaxFromProfit(totalsBeforeCurrentMonth.profit, settings),
+  const currentMonthTotals = getMonthTotals(entries, monthlySummaries, toMonthKey(today))
+  const currentMonthProgress = getMonthProgress(today, getCurrentMonthRange(today).end)
+  const completedPreviousMonths = today.getMonth()
+  const previousMonthFraction = completedPreviousMonths / 12
+  const currentMonthFraction = (completedPreviousMonths + 1) / 12
+  const previousMonthKeys = getPreviousMonthKeys(today)
+  const previousMonthsTotals = getTotalsForMonths(entries, monthlySummaries, previousMonthKeys)
+  const previousMonthsReserveModel = getAnnualReserveModel(
+    previousMonthsTotals,
+    previousMonthFraction,
     settings,
   )
-  const reserveBasisToDate = getReserveTarget(
-    getTaxFromProfit(year.ytdProfit, settings),
+  const reservedTaxFromPreviousMonths =
+    previousMonthsReserveModel === undefined
+      ? 0
+      : previousMonthsReserveModel.annualReserveTarget * previousMonthFraction
+  const currentMonthProjectedTotals = projectCurrentMonthTotals(
+    currentMonthTotals,
+    currentMonthProgress,
+  )
+  const monthEndTotals = combineBusinessTotals(previousMonthsTotals, currentMonthProjectedTotals)
+  const monthEndReserveModel = getAnnualReserveModel(
+    monthEndTotals,
+    currentMonthFraction,
     settings,
   )
-  const reserveTargetToDate =
-    year.annualReserveTarget === undefined
-      ? undefined
-      : year.annualReserveTarget * elapsedYearProgress
-  const reserveGapToDate =
-    reserveTargetToDate === undefined
-      ? undefined
-      : Math.max(0, reserveTargetToDate - reserveBasisToDate)
-  const reserveProjection =
-    year.annualReserveTarget === undefined
-      ? undefined
-      : Math.max(0, year.annualReserveTarget * monthEndYearProgress - reserveBasisBeforeCurrentMonth)
+  const forecastCalculatedTaxToSaveThisMonth =
+    monthEndReserveModel === undefined
+      ? 0
+      : Math.max(
+          0,
+          monthEndReserveModel.annualReserveTarget * currentMonthFraction -
+            reservedTaxFromPreviousMonths,
+        )
 
   return {
     hours: roundHours(currentMonthTotals.hours),
@@ -370,12 +404,10 @@ export function getCurrentMonthStats(
     cashOutstanding: roundCurrency(
       Math.max(0, currentMonthTotals.invoicedIncome - currentMonthTotals.paidIncome),
     ),
-    reserveProjection:
-      reserveProjection === undefined ? undefined : roundCurrency(reserveProjection),
-    reserveTargetToDate:
-      reserveTargetToDate === undefined ? undefined : roundCurrency(reserveTargetToDate),
-    reserveGapToDate:
-      reserveGapToDate === undefined ? undefined : roundCurrency(reserveGapToDate),
+    reservedTaxFromPreviousMonths: roundCurrency(reservedTaxFromPreviousMonths),
+    forecastCalculatedTaxToSaveThisMonth: roundCurrency(
+      forecastCalculatedTaxToSaveThisMonth,
+    ),
   }
 }
 
@@ -384,30 +416,26 @@ export function getBackfillMonthOption(monthlySummaries: MonthlySummary[]) {
     return '2026-01'
   }
 
-  const latest = monthlySummaries
+  const latestMonth = monthlySummaries
     .slice()
     .sort((left, right) => left.monthKey.localeCompare(right.monthKey))
     .at(-1)
 
-  if (!latest) {
+  if (!latestMonth) {
     return '2026-01'
   }
 
-  const latestDate = parseMonthKey(latest.monthKey)
-  latestDate.setMonth(latestDate.getMonth() + 1)
-  return toMonthKey(latestDate)
+  const nextMonthDate = parseMonthKey(latestMonth.monthKey)
+  nextMonthDate.setMonth(nextMonthDate.getMonth() + 1)
+  return toMonthKey(nextMonthDate)
 }
 
 export function sortMonthlySummaries(monthlySummaries: MonthlySummary[]) {
-  const byMonth = new Map<string, MonthlySummary>()
+  const byMonthKey = new Map<string, MonthlySummary>()
 
-  monthlySummaries.forEach((summary) => {
-    byMonth.set(summary.monthKey, summary)
+  monthlySummaries.forEach((monthlySummary) => {
+    byMonthKey.set(monthlySummary.monthKey, monthlySummary)
   })
 
-  return Array.from(byMonth.values()).sort((left, right) => left.monthKey.localeCompare(right.monthKey))
-}
-
-export function getDefaultHourlyRateForSettings(settings: Settings) {
-  return roundCurrency(getDefaultHourlyRate(settings))
+  return Array.from(byMonthKey.values()).sort((left, right) => left.monthKey.localeCompare(right.monthKey))
 }

@@ -20,14 +20,13 @@ export interface MonthlySummary {
 }
 
 export interface Settings {
-  monthlyNetGoal: number
+  targetNetMonth: number
   spouseMonthlyIncome: number
   defaultShiftIncome: number
   defaultShiftHours: number
-  weeklyHoursGoal: number
+  weeklyHoursTarget: number
   reserveBufferPercent: number
-  incomeTaxPercent: number
-  additionalTaxPercent: number
+  qualifiesForSelfEmployedDeduction: boolean
 }
 
 export interface StoredAppState {

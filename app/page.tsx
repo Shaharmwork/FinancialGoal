@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Configuration as ConfigurationScreen } from '@/components/configuration'
 import { DailyLog } from '@/components/daily-log'
 import { Dashboard } from '@/components/dashboard'
@@ -71,6 +71,10 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: 'auto' })
   }, [currentScreen])
 
+  useEffect(() => {
+    console.log('[Financial Goal] currentScreen changed:', currentScreen)
+  }, [currentScreen])
+
   const handleAddEntry = (entry: DailyEntry) => {
     setEntries((previousEntries) => [entry, ...previousEntries])
     setCurrentScreen('dashboard')
@@ -80,46 +84,45 @@ export default function Home() {
     setCurrentScreen(screen)
   }
 
+  const activeScreen = useMemo(() => {
+    if (currentScreen === 'dashboard') {
+      return (
+        <Dashboard
+          entries={entries}
+          monthlySummaries={monthlySummaries}
+          settings={settings}
+        />
+      )
+    }
+
+    if (currentScreen === 'daily-log') {
+      return <DailyLog entries={entries} settings={settings} onAddEntry={handleAddEntry} />
+    }
+
+    return (
+      <ConfigurationScreen
+        monthlySummaries={monthlySummaries}
+        onUpdateMonthlySummaries={setMonthlySummaries}
+        settings={settings}
+        onUpdateSettings={setSettings}
+      />
+    )
+  }, [currentScreen, entries, monthlySummaries, settings])
+
   return (
-    <div className="min-h-screen overflow-x-hidden bg-background text-foreground">
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[radial-gradient(circle_at_top_left,rgba(255,216,107,0.35),transparent_36%),radial-gradient(circle_at_top_right,rgba(136,201,255,0.28),transparent_32%),radial-gradient(circle_at_30%_75%,rgba(201,188,255,0.22),transparent_26%)]" />
+    <div className="relative isolate min-h-screen overflow-x-hidden bg-background text-foreground">
+      <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-72 bg-[radial-gradient(circle_at_top_left,rgba(255,216,107,0.35),transparent_36%),radial-gradient(circle_at_top_right,rgba(136,201,255,0.28),transparent_32%),radial-gradient(circle_at_30%_75%,rgba(201,188,255,0.22),transparent_26%)]" />
 
-      <main className="relative mx-auto flex min-h-screen w-full max-w-[30rem] flex-col px-4 pb-[calc(7.75rem+env(safe-area-inset-bottom))] pt-4 sm:px-5">
-        <div className="w-full">
-          {currentScreen === 'dashboard' ? (
-            <section key="dashboard" data-screen-panel="dashboard" className="screen-panel-active">
-              <Dashboard
-                entries={entries}
-                monthlySummaries={monthlySummaries}
-                settings={settings}
-              />
-            </section>
-          ) : null}
-
-          {currentScreen === 'daily-log' ? (
-            <section key="daily-log" data-screen-panel="daily-log" className="screen-panel-active">
-              <DailyLog entries={entries} settings={settings} onAddEntry={handleAddEntry} />
-            </section>
-          ) : null}
-
-          {currentScreen === 'configuration' ? (
-            <section
-              key="configuration"
-              data-screen-panel="configuration"
-              className="screen-panel-active"
-            >
-              <ConfigurationScreen
-                monthlySummaries={monthlySummaries}
-                onUpdateMonthlySummaries={setMonthlySummaries}
-                settings={settings}
-                onUpdateSettings={setSettings}
-              />
-            </section>
-          ) : null}
+      <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-[30rem] flex-col px-4 pb-[calc(7.75rem+env(safe-area-inset-bottom))] pt-4 sm:px-5">
+        <div className="mb-4 rounded-[1.2rem] border border-border bg-amber-100 px-4 py-3 text-center text-sm font-semibold tracking-[0.16em] text-amber-900">
+          {getDebugScreenLabel(currentScreen)}
         </div>
+        <section key={currentScreen} data-screen={currentScreen} className="w-full">
+          {activeScreen}
+        </section>
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-[120] px-4 pb-[calc(env(safe-area-inset-bottom)+0.9rem)] pt-3">
+      <nav className="fixed inset-x-0 bottom-0 z-[140] px-4 pb-[calc(env(safe-area-inset-bottom)+0.9rem)] pt-3">
         <div className="mx-auto grid max-w-[30rem] grid-cols-3 gap-2 rounded-[2rem] border border-border bg-card p-2 shadow-[0_18px_36px_rgba(24,32,48,0.14)]">
           {navItems.map((item) => {
             const isActive = currentScreen === item.id
@@ -128,23 +131,12 @@ export default function Home() {
               <button
                 key={item.id}
                 aria-current={isActive ? 'page' : undefined}
-                className={`touch-manipulation select-none rounded-[1.45rem] px-3 py-2.5 text-sm font-medium transition ${
+                className={`min-h-[4.5rem] w-full touch-manipulation select-none rounded-[1.45rem] px-3 py-3 text-sm font-medium transition ${
                   isActive
                     ? 'bg-[linear-gradient(135deg,rgba(255,216,107,0.95),rgba(255,143,122,0.85))] text-foreground shadow-sm'
                     : 'text-muted-foreground'
                 }`}
-                onClick={() => {
-                  handleScreenChange(item.id)
-                }}
-                onMouseDown={() => {
-                  handleScreenChange(item.id)
-                }}
-                onPointerUp={() => {
-                  handleScreenChange(item.id)
-                }}
-                onTouchStart={() => {
-                  handleScreenChange(item.id)
-                }}
+                onClick={() => handleScreenChange(item.id)}
                 type="button"
               >
                 <span className="flex flex-col items-center justify-center gap-1">
@@ -171,6 +163,18 @@ export default function Home() {
       </nav>
     </div>
   )
+}
+
+function getDebugScreenLabel(screen: Screen) {
+  if (screen === 'dashboard') {
+    return 'HOME SCREEN'
+  }
+
+  if (screen === 'daily-log') {
+    return 'REPORT SCREEN'
+  }
+
+  return 'CONFIG SCREEN'
 }
 
 function HomeIcon() {

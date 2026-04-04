@@ -56,10 +56,6 @@
     -webkit-tap-highlight-color: transparent;
   }
 
-  .screen-panel-active {
-    display: block;
-  }
-
   ::selection {
     background: color-mix(in oklab, var(--primary) 30%, white);
   }

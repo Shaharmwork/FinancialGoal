@@ -16,6 +16,16 @@ function parseNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
+function getCalculatedDefaultInvoiceAmount(hours: string, settings: Settings) {
+  const resolvedHours = parseNumber(hours)
+
+  if (resolvedHours > 0 && settings.defaultShiftHours > 0) {
+    return (resolvedHours / settings.defaultShiftHours) * settings.defaultShiftIncome
+  }
+
+  return settings.defaultShiftIncome
+}
+
 export function DailyLog({ entries, settings, onAddEntry }: DailyLogProps) {
   const [date, setDate] = useState(toDateKey(new Date()))
   const [hours, setHours] = useState('')
@@ -37,13 +47,16 @@ export function DailyLog({ entries, settings, onAddEntry }: DailyLogProps) {
     .filter((entry) => entry.date >= toDateKey(start) && entry.date <= toDateKey(end))
     .sort((left, right) => right.date.localeCompare(left.date))
     .slice(0, 5)
+  const calculatedDefaultInvoiceAmount = getCalculatedDefaultInvoiceAmount(hours, settings)
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
     const resolvedHours = parseNumber(hours)
     const resolvedInvoicedIncome =
-      invoicedIncome.trim() === '' ? settings.defaultShiftIncome : parseNumber(invoicedIncome)
+      invoicedIncome.trim() === ''
+        ? getCalculatedDefaultInvoiceAmount(hours, settings)
+        : parseNumber(invoicedIncome)
     const resolvedPaidIncome = parseNumber(paidIncome)
     const resolvedExpenses = parseNumber(expenses)
 
@@ -137,12 +150,12 @@ export function DailyLog({ entries, settings, onAddEntry }: DailyLogProps) {
               type="number"
               min="0"
               step="0.01"
-              placeholder={settings.defaultShiftIncome.toFixed(2)}
+              placeholder={calculatedDefaultInvoiceAmount.toFixed(2)}
               value={invoicedIncome}
               onChange={(event) => setInvoicedIncome(event.target.value)}
             />
             <span className="mt-2 block text-xs text-muted-foreground">
-              Leave empty to use the default invoice amount from configuration.
+              Leave empty to calculate the default from your hours and configuration.
             </span>
           </label>
 
@@ -176,11 +189,11 @@ export function DailyLog({ entries, settings, onAddEntry }: DailyLogProps) {
           </label>
 
           <div className="rounded-2xl bg-muted px-4 py-3 text-sm text-muted-foreground">
-            Default invoice amount is{' '}
+            Default invoice amount right now is{' '}
             <span className="font-medium text-foreground">
-              {formatCurrencyPrecise(settings.defaultShiftIncome)}
+              {formatCurrencyPrecise(calculatedDefaultInvoiceAmount)}
             </span>
-            . Paid income can stay empty until the invoice is actually settled.
+            . It scales from billed hours using your configured shift income and shift hours.
           </div>
 
           <button

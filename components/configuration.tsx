@@ -20,6 +20,13 @@ interface FieldProps {
   help?: string
 }
 
+interface ToggleFieldProps {
+  label: string
+  checked: boolean
+  onChange: (checked: boolean) => void
+  help?: string
+}
+
 function parseNumber(value: string) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : 0
@@ -55,13 +62,33 @@ function SettingField({ label, value, onChange, step = 1, prefix, suffix, help }
   )
 }
 
+function ToggleField({ label, checked, onChange, help }: ToggleFieldProps) {
+  return (
+    <label className="block">
+      <span className="mb-2 block text-sm font-medium text-foreground">{label}</span>
+      <button
+        aria-pressed={checked}
+        className={`flex w-full items-center justify-between rounded-2xl border border-border px-4 py-3 text-left text-base transition ${
+          checked ? 'bg-primary text-primary-foreground' : 'bg-background text-foreground'
+        }`}
+        onClick={() => onChange(!checked)}
+        type="button"
+      >
+        <span>{checked ? 'Yes' : 'No'}</span>
+        <span className="text-sm">{checked ? 'Eligible' : 'Not eligible'}</span>
+      </button>
+      {help ? <span className="mt-2 block text-xs text-muted-foreground">{help}</span> : null}
+    </label>
+  )
+}
+
 export function Configuration({
   settings,
   monthlySummaries,
   onUpdateSettings,
   onUpdateMonthlySummaries,
 }: ConfigurationProps) {
-  const updateField = (key: keyof Settings, value: number) => {
+  const updateField = (key: keyof Settings, value: Settings[keyof Settings]) => {
     onUpdateSettings({
       ...settings,
       [key]: value,
@@ -115,14 +142,14 @@ export function Configuration({
         <div className="mt-4 grid gap-4">
           <SettingField
             label="Target Net Month"
-            value={settings.monthlyNetGoal}
-            onChange={(value) => updateField('monthlyNetGoal', value)}
+            value={settings.targetNetMonth}
+            onChange={(value) => updateField('targetNetMonth', value)}
             prefix="€"
           />
           <SettingField
             label="Hours I Want To Work Every Week"
-            value={settings.weeklyHoursGoal}
-            onChange={(value) => updateField('weeklyHoursGoal', value)}
+            value={settings.weeklyHoursTarget}
+            onChange={(value) => updateField('weeklyHoursTarget', value)}
             step={0.25}
           />
           <SettingField
@@ -150,6 +177,12 @@ export function Configuration({
             onChange={(value) => updateField('reserveBufferPercent', value)}
             suffix="%"
             step={0.5}
+          />
+          <ToggleField
+            label="Qualifies For Self-Employed Deduction"
+            checked={settings.qualifiesForSelfEmployedDeduction}
+            onChange={(value) => updateField('qualifiesForSelfEmployedDeduction', value)}
+            help="Uses the 2026 self-employed deduction of €1,200 in the tax estimate."
           />
         </div>
       </section>
