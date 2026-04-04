@@ -3,14 +3,13 @@ import type { DailyEntry, MonthlySummary, Screen, Settings, StoredAppState } fro
 export const STORAGE_KEY = 'financial-goal-mvp-state'
 
 export const defaultSettings: Settings = {
-  monthlyNetGoal: 4500,
+  targetNetMonth: 4500,
   spouseMonthlyIncome: 2500,
   defaultShiftIncome: 350,
   defaultShiftHours: 8,
-  weeklyHoursGoal: 30,
+  weeklyHoursTarget: 30,
   reserveBufferPercent: 5,
-  incomeTaxPercent: 28,
-  additionalTaxPercent: 7,
+  qualifiesForSelfEmployedDeduction: true,
 }
 
 export const defaultMonthlySummaries: MonthlySummary[] = [
@@ -58,6 +57,10 @@ function readString(value: unknown) {
   return typeof value === 'string' ? value : undefined
 }
 
+function readBoolean(value: unknown, fallback: boolean) {
+  return typeof value === 'boolean' ? value : fallback
+}
+
 function normalizeScreen(value: unknown): Screen {
   return value === 'dashboard' || value === 'daily-log' || value === 'configuration'
     ? value
@@ -70,9 +73,9 @@ export function normalizeSettings(value: unknown): Settings {
   }
 
   return {
-    monthlyNetGoal: readNumber(
-      value.monthlyNetGoal ?? value.targetNetMonth,
-      defaultSettings.monthlyNetGoal,
+    targetNetMonth: readNumber(
+      value.targetNetMonth ?? value.monthlyNetGoal,
+      defaultSettings.targetNetMonth,
     ),
     spouseMonthlyIncome: readNumber(
       value.spouseMonthlyIncome,
@@ -80,21 +83,17 @@ export function normalizeSettings(value: unknown): Settings {
     ),
     defaultShiftIncome: readNumber(value.defaultShiftIncome, defaultSettings.defaultShiftIncome),
     defaultShiftHours: readNumber(value.defaultShiftHours, defaultSettings.defaultShiftHours),
-    weeklyHoursGoal: readNumber(
-      value.weeklyHoursGoal ?? value.weeklyHoursTarget,
-      defaultSettings.weeklyHoursGoal,
+    weeklyHoursTarget: readNumber(
+      value.weeklyHoursTarget ?? value.weeklyHoursGoal,
+      defaultSettings.weeklyHoursTarget,
     ),
     reserveBufferPercent: readNumber(
       value.reserveBufferPercent,
       defaultSettings.reserveBufferPercent,
     ),
-    incomeTaxPercent: readNumber(
-      value.incomeTaxPercent ?? value.taxPercentage,
-      defaultSettings.incomeTaxPercent,
-    ),
-    additionalTaxPercent: readNumber(
-      value.additionalTaxPercent ?? value.stateIncomeTax,
-      defaultSettings.additionalTaxPercent,
+    qualifiesForSelfEmployedDeduction: readBoolean(
+      value.qualifiesForSelfEmployedDeduction,
+      defaultSettings.qualifiesForSelfEmployedDeduction,
     ),
   }
 }
