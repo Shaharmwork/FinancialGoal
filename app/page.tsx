@@ -191,30 +191,10 @@ export default function Home() {
       return
     }
 
-    void saveSettingsToSupabase(settings).catch((error) => {
-      console.error('[Financial Goal] Failed to save settings.', error)
-    })
-  }, [settings, hasLoadedRemoteState])
-
-  useEffect(() => {
-    if (!hasLoadedRemoteState) {
-      return
-    }
-
     void saveDailyEntriesToSupabase(entries).catch((error) => {
       console.error('[Financial Goal] Failed to save daily entries.', error)
     })
   }, [entries, hasLoadedRemoteState])
-
-  useEffect(() => {
-    if (!hasLoadedRemoteState) {
-      return
-    }
-
-    void saveMonthlySummariesToSupabase(monthlySummaries).catch((error) => {
-      console.error('[Financial Goal] Failed to save monthly summaries.', error)
-    })
-  }, [monthlySummaries, hasLoadedRemoteState])
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' })
@@ -231,6 +211,19 @@ export default function Home() {
 
   const handleScreenChange = (screen: Screen) => {
     setCurrentScreen(screen)
+  }
+
+  const handleSaveConfiguration = async (
+    nextSettings: Settings,
+    nextMonthlySummaries: MonthlySummary[],
+  ) => {
+    await Promise.all([
+      saveSettingsToSupabase(nextSettings),
+      saveMonthlySummariesToSupabase(nextMonthlySummaries),
+    ])
+
+    setSettings(nextSettings)
+    setMonthlySummaries(nextMonthlySummaries)
   }
 
   const handleSignIn = async (email: string, password: string) => {
@@ -292,12 +285,11 @@ export default function Home() {
     return (
       <ConfigurationScreen
         monthlySummaries={monthlySummaries}
-        onUpdateMonthlySummaries={setMonthlySummaries}
+        onSaveConfiguration={handleSaveConfiguration}
         settings={settings}
-        onUpdateSettings={setSettings}
       />
     )
-  }, [currentScreen, entries, monthlySummaries, settings])
+  }, [currentScreen, entries, handleAddEntry, handleSaveConfiguration, monthlySummaries, settings])
 
   const isConfigured = hasSupabaseConfig()
 
@@ -314,8 +306,6 @@ export default function Home() {
       window.clearTimeout(timeoutId)
     }
   }, [toastErrorMessage])
-
- 
 
   if (!session) {
     return (
