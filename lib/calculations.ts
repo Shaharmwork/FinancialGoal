@@ -171,13 +171,15 @@ function getMonthKeysUntilCurrentMonth(today: Date) {
 }
 
 function getMonthTotalsFromEntries(entries: DailyEntry[], monthKey: string) {
-  const monthEntries = entries.filter((entry) => entry.date.slice(0, 7) === monthKey)
+  return getMonthTotalsForEntryList(entries.filter((entry) => entry.date.slice(0, 7) === monthKey))
+}
 
+function getMonthTotalsForEntryList(entries: DailyEntry[]) {
   return toBusinessTotals({
-    hours: sumEntries(monthEntries, 'hours'),
-    invoicedIncome: sumEntries(monthEntries, 'invoicedIncome'),
-    paidIncome: sumEntries(monthEntries, 'paidIncome'),
-    expenses: sumEntries(monthEntries, 'expenses'),
+    hours: sumEntries(entries, 'hours'),
+    invoicedIncome: sumEntries(entries, 'invoicedIncome'),
+    paidIncome: sumEntries(entries, 'paidIncome'),
+    expenses: sumEntries(entries, 'expenses'),
   })
 }
 
@@ -186,6 +188,12 @@ function getMonthTotals(
   monthlySummaries: MonthlySummary[],
   monthKey: string,
 ) {
+  const monthEntries = entries.filter((entry) => entry.date.slice(0, 7) === monthKey)
+
+  if (monthEntries.length > 0) {
+    return getMonthTotalsForEntryList(monthEntries)
+  }
+
   const monthlySummary = monthlySummaries.find((summary) => summary.monthKey === monthKey)
 
   if (monthlySummary) {

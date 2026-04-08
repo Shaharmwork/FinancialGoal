@@ -94,7 +94,7 @@ export function Dashboard({ entries, monthlySummaries, settings }: DashboardProp
         </article>
 
         <article className="rounded-[1.8rem] border border-border bg-card p-4 shadow-sm">
-          <div className="text-sm font-semibold text-foreground">Cash received</div>
+          <div className="text-sm font-semibold text-foreground">Cash Received This Month</div>
           <p className="mt-3 text-2xl font-semibold text-foreground">
             {formatCurrency(month.paidIncome)}
           </p>
