@@ -1,4 +1,5 @@
 import { estimateAnnualTaxFor2026, estimateRequiredAnnualBusinessProfitForTargetNet2026 } from './tax-engine'
+import { defaultSettings } from './default-state'
 import type { DailyEntry, MonthlySummary, Settings } from './types'
 
 function roundCurrency(value: number) {
@@ -46,6 +47,180 @@ export function getCurrentMonthRange(today = new Date()) {
   }
 }
 
+function isWeekday(date: Date) {
+  const day = date.getDay()
+  return day !== 0 && day !== 6
+}
+
+function isPositiveNumber(value: number | null) {
+  return typeof value === 'number' && value > 0
+}
+
+function isNonNegativeNumber(value: number | null) {
+  return typeof value === 'number' && value >= 0
+}
+
+function getTargetNetMonth(settings: Settings) {
+  return settings.targetNetMonth ?? 0
+}
+
+function getWeeklyHoursTarget(settings: Settings) {
+  return settings.weeklyHoursTarget ?? 0
+}
+
+function getDefaultShiftIncome(settings: Settings) {
+  return settings.defaultShiftIncome ?? 0
+}
+
+function getDefaultShiftHours(settings: Settings) {
+  return settings.defaultShiftHours ?? 0
+}
+
+function getReserveBufferPercent(settings: Settings) {
+  return settings.reserveBufferPercent ?? 0
+}
+
+function getSelfEmployedDeductionFlag(settings: Settings) {
+  return settings.qualifiesForSelfEmployedDeduction ?? false
+}
+
+function hasValidBaseConfiguration(settings: Settings) {
+  return (
+    isPositiveNumber(settings.targetNetMonth) &&
+    isPositiveNumber(settings.weeklyHoursTarget) &&
+    isPositiveNumber(settings.defaultShiftIncome) &&
+    isPositiveNumber(settings.defaultShiftHours) &&
+    isNonNegativeNumber(settings.reserveBufferPercent) &&
+    typeof settings.qualifiesForSelfEmployedDeduction === 'boolean'
+  )
+}
+
+function isUsingStarterBaseSettings(settings: Settings) {
+  return (
+    settings.targetNetMonth === defaultSettings.targetNetMonth &&
+    settings.weeklyHoursTarget === defaultSettings.weeklyHoursTarget &&
+    settings.defaultShiftIncome === defaultSettings.defaultShiftIncome &&
+    settings.defaultShiftHours === defaultSettings.defaultShiftHours &&
+    settings.reserveBufferPercent === defaultSettings.reserveBufferPercent &&
+    settings.qualifiesForSelfEmployedDeduction ===
+      defaultSettings.qualifiesForSelfEmployedDeduction
+  )
+}
+
+export interface CurrentMonthWeekdayCoverage {
+  complete: boolean
+  elapsedWeekdaysBeforeToday: number
+  loggedWeekdaysBeforeToday: number
+  missingWeekdaysBeforeToday: number
+}
+
+export interface SetupCompleteness {
+  baseConfigurationComplete: boolean
+  isUsingStarterBaseSettings: boolean
+  previousMonthsComplete: boolean
+}
+
+export function isMissingHistoricalData(
+  monthlySummaries: MonthlySummary[],
+  today = new Date(),
+) {
+  return getMissingPreviousMonthSummaryKeys(monthlySummaries, today).length > 0
+}
+
+export function getMissingPreviousMonthSummaryKeys(
+  monthlySummaries: MonthlySummary[],
+  today = new Date(),
+) {
+  if (today.getMonth() === 0) {
+    return []
+  }
+
+  const currentYear = today.getFullYear()
+  const existingMonthKeys = new Set(
+    monthlySummaries
+      .filter((summary) => summary.monthKey.startsWith(`${currentYear}-`))
+      .map((summary) => summary.monthKey),
+  )
+
+  return Array.from({ length: today.getMonth() }, (_, index) => {
+    return `${currentYear}-${pad(index + 1)}`
+  }).filter((monthKey) => !existingMonthKeys.has(monthKey))
+}
+
+export function getCurrentMonthWeekdayCoverage(
+  entries: DailyEntry[],
+  today = new Date(),
+): CurrentMonthWeekdayCoverage {
+  const { start } = getCurrentMonthRange(today)
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1)
+
+  if (yesterday < start) {
+    return {
+      complete: true,
+      elapsedWeekdaysBeforeToday: 0,
+      loggedWeekdaysBeforeToday: 0,
+      missingWeekdaysBeforeToday: 0,
+    }
+  }
+
+  const elapsedWeekdays = countWeekdays(start, yesterday)
+  const currentMonthEntryDays = new Set(
+    entries
+      .filter((entry) => entry.date >= toDateKey(start) && entry.date < toDateKey(today))
+      .filter((entry) => isWeekday(parseDateKey(entry.date)))
+      .map((entry) => entry.date),
+  )
+
+  const loggedWeekdaysBeforeToday = currentMonthEntryDays.size
+  const missingWeekdaysBeforeToday = Math.max(0, elapsedWeekdays - loggedWeekdaysBeforeToday)
+  const complete =
+    elapsedWeekdays === 0 ||
+    missingWeekdaysBeforeToday <= Math.max(1, Math.floor(elapsedWeekdays / 3))
+
+  return {
+    complete,
+    elapsedWeekdaysBeforeToday: elapsedWeekdays,
+    loggedWeekdaysBeforeToday,
+    missingWeekdaysBeforeToday,
+  }
+}
+
+export function isCurrentMonthIncomplete(entries: DailyEntry[], today = new Date()) {
+  return !getCurrentMonthWeekdayCoverage(entries, today).complete
+}
+
+export function getEarliestMissingCurrentMonthWeekday(
+  entries: DailyEntry[],
+  today = new Date(),
+) {
+  const { start } = getCurrentMonthRange(today)
+  const todayKey = toDateKey(today)
+  const entryDays = new Set(entries.map((entry) => entry.date))
+  const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate())
+
+  while (toDateKey(cursor) < todayKey) {
+    const dateKey = toDateKey(cursor)
+    if (isWeekday(cursor) && !entryDays.has(dateKey)) {
+      return dateKey
+    }
+    cursor.setDate(cursor.getDate() + 1)
+  }
+
+  return undefined
+}
+
+export function getSetupCompleteness(
+  settings: Settings,
+  monthlySummaries: MonthlySummary[],
+  today = new Date(),
+): SetupCompleteness {
+  return {
+    baseConfigurationComplete: hasValidBaseConfiguration(settings),
+    isUsingStarterBaseSettings: isUsingStarterBaseSettings(settings),
+    previousMonthsComplete: !isMissingHistoricalData(monthlySummaries, today),
+  }
+}
+
 export function filterEntriesByRange(entries: DailyEntry[], start: Date, end: Date) {
   const startKey = toDateKey(start)
   const endKey = toDateKey(end)
@@ -83,7 +258,11 @@ function countWeekdays(start: Date, end: Date) {
 }
 
 function getUniqueWorkDays(entries: DailyEntry[]) {
-  return new Set(entries.filter((entry) => entry.hours > 0).map((entry) => entry.date)).size
+  return new Set(
+    entries
+      .filter((entry) => entry.dayStatus !== 'no_work' && entry.hours > 0)
+      .map((entry) => entry.date),
+  ).size
 }
 
 function projectFromPace(actualValue: number, progress: number) {
@@ -104,13 +283,13 @@ function projectFromPaceOrZero(actualValue: number, progress: number) {
 
 function getGoalAnnualBusinessProfit(settings: Settings) {
   return estimateRequiredAnnualBusinessProfitForTargetNet2026({
-    targetAnnualNet: settings.targetNetMonth * 12,
-    qualifiesForSelfEmployedDeduction: settings.qualifiesForSelfEmployedDeduction,
+    targetAnnualNet: getTargetNetMonth(settings) * 12,
+    qualifiesForSelfEmployedDeduction: getSelfEmployedDeductionFlag(settings),
   })
 }
 
 function getReserveTarget(estimatedAnnualTax: number, settings: Settings) {
-  return estimatedAnnualTax * (1 + Math.max(0, settings.reserveBufferPercent) / 100)
+  return estimatedAnnualTax * (1 + Math.max(0, getReserveBufferPercent(settings)) / 100)
 }
 
 interface BusinessTotals {
@@ -190,6 +369,7 @@ function getMonthTotals(
 ) {
   const monthEntries = entries.filter((entry) => entry.date.slice(0, 7) === monthKey)
 
+  // Specific daily entries always win for a month. Manual summaries are only the fallback.
   if (monthEntries.length > 0) {
     return getMonthTotalsForEntryList(monthEntries)
   }
@@ -227,7 +407,7 @@ function getAnnualReserveModel(
   const annualTaxEstimate = estimateAnnualTaxFor2026({
     annualBusinessIncome,
     annualBusinessExpenses,
-    qualifiesForSelfEmployedDeduction: settings.qualifiesForSelfEmployedDeduction,
+    qualifiesForSelfEmployedDeduction: getSelfEmployedDeductionFlag(settings),
   })
 
   return {
@@ -302,19 +482,20 @@ export function getCurrentWeekStats(
 ): WeekStats {
   const { start, end } = getCurrentWeekRange(today)
   const weekEntries = filterEntriesByRange(entries, start, end)
+  const workedWeekEntries = weekEntries.filter((entry) => entry.dayStatus !== 'no_work')
   const actualHours = sumEntries(weekEntries, 'hours')
   const workDaysLogged = getUniqueWorkDays(weekEntries)
   const remainingStart = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1)
   const remainingWeekdays = remainingStart <= end ? countWeekdays(remainingStart, end) : 0
   const dailyHoursEstimate =
-    workDaysLogged > 0 ? actualHours / workDaysLogged : settings.defaultShiftHours
+    workDaysLogged > 0 ? actualHours / workDaysLogged : getDefaultShiftHours(settings)
   const projectedHours = actualHours + remainingWeekdays * dailyHoursEstimate
 
   return {
-    goalHours: roundHours(settings.weeklyHoursTarget),
+    goalHours: roundHours(getWeeklyHoursTarget(settings)),
     actualHours: roundHours(actualHours),
-    projectedHours: weekEntries.length > 0 ? roundHours(projectedHours) : undefined,
-    hoursLeft: roundHours(Math.max(0, settings.weeklyHoursTarget - actualHours)),
+    projectedHours: workedWeekEntries.length > 0 ? roundHours(projectedHours) : undefined,
+    hoursLeft: roundHours(Math.max(0, getWeeklyHoursTarget(settings) - actualHours)),
   }
 }
 
@@ -334,7 +515,7 @@ export function getCurrentYearStats(
 
   return {
     goalAnnualBusinessProfit: getGoalAnnualBusinessProfit(settings),
-    goalAnnualNet: roundCurrency(settings.targetNetMonth * 12),
+    goalAnnualNet: roundCurrency(getTargetNetMonth(settings) * 12),
     ytdInvoicedIncome: roundCurrency(yearToDateTotals.invoicedIncome),
     ytdPaidIncome: roundCurrency(yearToDateTotals.paidIncome),
     ytdExpenses: roundCurrency(yearToDateTotals.expenses),
@@ -420,8 +601,14 @@ export function getCurrentMonthStats(
 }
 
 export function getBackfillMonthOption(monthlySummaries: MonthlySummary[]) {
+  const missingPreviousMonths = getMissingPreviousMonthSummaryKeys(monthlySummaries)
+
+  if (missingPreviousMonths.length > 0) {
+    return missingPreviousMonths[0]
+  }
+
   if (monthlySummaries.length === 0) {
-    return '2026-01'
+    return `${new Date().getFullYear()}-01`
   }
 
   const latestMonth = monthlySummaries
@@ -430,7 +617,7 @@ export function getBackfillMonthOption(monthlySummaries: MonthlySummary[]) {
     .at(-1)
 
   if (!latestMonth) {
-    return '2026-01'
+    return `${new Date().getFullYear()}-01`
   }
 
   const nextMonthDate = parseMonthKey(latestMonth.monthKey)
@@ -445,5 +632,5 @@ export function sortMonthlySummaries(monthlySummaries: MonthlySummary[]) {
     byMonthKey.set(monthlySummary.monthKey, monthlySummary)
   })
 
-  return Array.from(byMonthKey.values()).sort((left, right) => left.monthKey.localeCompare(right.monthKey))
+  return Array.from(byMonthKey.values()).sort((left, right) => right.monthKey.localeCompare(left.monthKey))
 }

@@ -1,8 +1,10 @@
 export type Screen = 'dashboard' | 'daily-log' | 'configuration'
+export type DayStatus = 'worked' | 'no_work'
 
 export interface DailyEntry {
   id: string
   date: string
+  dayStatus?: DayStatus
   hours: number
   invoicedIncome: number
   paidIncome: number
@@ -20,13 +22,13 @@ export interface MonthlySummary {
 }
 
 export interface Settings {
-  targetNetMonth: number
+  targetNetMonth: number | null
   spouseMonthlyIncome: number
-  defaultShiftIncome: number
-  defaultShiftHours: number
-  weeklyHoursTarget: number
-  reserveBufferPercent: number
-  qualifiesForSelfEmployedDeduction: boolean
+  defaultShiftIncome: number | null
+  defaultShiftHours: number | null
+  weeklyHoursTarget: number | null
+  reserveBufferPercent: number | null
+  qualifiesForSelfEmployedDeduction: boolean | null
 }
 
 export interface StoredAppState {

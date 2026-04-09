@@ -6,6 +6,7 @@ import { Configuration as ConfigurationScreen } from '@/components/configuration
 import { DailyLog } from '@/components/daily-log'
 import { Dashboard } from '@/components/dashboard'
 import { LoginForm } from '@/components/login-form'
+import { WarningModal } from '@/components/warning-modal'
 import {
   loadRemoteAppData,
   saveDailyEntriesToSupabase,
@@ -13,10 +14,11 @@ import {
   saveSettingsToSupabase,
 } from '@/lib/app-data-store'
 import {
-  defaultStoredState,
-  normalizeStoredState,
-  STORAGE_KEY,
-} from '@/lib/default-state'
+  getUserOnboardingDismissals,
+  updateUserOnboardingDismissals,
+} from '@/lib/onboarding-dismissals'
+import { starterStoredState } from '@/lib/default-state'
+import { toMonthKey } from '@/lib/calculations'
 import {
   getCurrentSession,
   hasSupabaseConfig,
@@ -29,7 +31,6 @@ import type {
   MonthlySummary,
   Screen,
   Settings,
-  StoredAppState,
 } from '@/lib/types'
 
 const navItems: Array<{ id: Screen; label: string }> = [
@@ -38,39 +39,88 @@ const navItems: Array<{ id: Screen; label: string }> = [
   { id: 'configuration', label: 'Configuration' },
 ]
 
-export default function Home() {
-  const [currentScreen, setCurrentScreen] = useState<Screen>(defaultStoredState.currentScreen)
-  const [entries, setEntries] = useState<DailyEntry[]>(defaultStoredState.entries)
-  const [monthlySummaries, setMonthlySummaries] = useState<MonthlySummary[]>(
-    defaultStoredState.monthlySummaries,
+function cloneEntries(entries: DailyEntry[]) {
+  return entries.map((entry) => ({ ...entry }))
+}
+
+function getComparableEntries(entries: DailyEntry[]) {
+  return [...entries].sort((left, right) => left.date.localeCompare(right.date))
+}
+
+function areEntriesEqual(left: DailyEntry[], right: DailyEntry[]) {
+  if (left.length !== right.length) {
+    return false
+  }
+
+  const comparableLeft = getComparableEntries(left)
+  const comparableRight = getComparableEntries(right)
+
+  return comparableLeft.every((leftEntry, index) => {
+    const rightEntry = comparableRight[index]
+
+    return (
+      leftEntry.date === rightEntry.date &&
+      (leftEntry.dayStatus ?? 'worked') === (rightEntry.dayStatus ?? 'worked') &&
+      leftEntry.hours === rightEntry.hours &&
+      leftEntry.invoicedIncome === rightEntry.invoicedIncome &&
+      leftEntry.paidIncome === rightEntry.paidIncome &&
+      leftEntry.expenses === rightEntry.expenses &&
+      (leftEntry.note ?? '') === (rightEntry.note ?? '') &&
+      (leftEntry.source ?? '') === (rightEntry.source ?? '')
+    )
+  })
+}
+
+function hasFutureDatedEntries(entries: DailyEntry[], todayDateKey: string) {
+  return entries.some((entry) => entry.date > todayDateKey)
+}
+
+function getNewSummaryConflictMonthKeys(
+  savedEntries: DailyEntry[],
+  nextEntries: DailyEntry[],
+  monthlySummaries: MonthlySummary[],
+) {
+  const summaryMonthKeys = new Set(monthlySummaries.map((summary) => summary.monthKey))
+  const savedEntryMonthKeys = new Set(savedEntries.map((entry) => entry.date.slice(0, 7)))
+  const nextEntryMonthKeys = new Set(nextEntries.map((entry) => entry.date.slice(0, 7)))
+
+  return [...summaryMonthKeys].filter(
+    (monthKey) => nextEntryMonthKeys.has(monthKey) && !savedEntryMonthKeys.has(monthKey),
   )
-  const [settings, setSettings] = useState<Settings>(defaultStoredState.settings)
-  const [localStateForMigration, setLocalStateForMigration] = useState<StoredAppState | null>(null)
-  const [hasLoadedLocalState, setHasLoadedLocalState] = useState(false)
+}
+
+export default function Home() {
+  const todayDateKey = new Date().toISOString().slice(0, 10)
+  const [currentScreen, setCurrentScreen] = useState<Screen>(starterStoredState.currentScreen)
+  const [entries, setEntries] = useState<DailyEntry[]>(starterStoredState.entries)
+  const [reportDraftEntries, setReportDraftEntries] = useState<DailyEntry[] | null>(null)
+  const [monthlySummaries, setMonthlySummaries] = useState<MonthlySummary[]>(
+    starterStoredState.monthlySummaries,
+  )
+  const [settings, setSettings] = useState<Settings>(starterStoredState.settings)
   const [hasCheckedSession, setHasCheckedSession] = useState(false)
   const [hasLoadedRemoteState, setHasLoadedRemoteState] = useState(false)
+  const [displayName, setDisplayName] = useState<string | undefined>(undefined)
+  const [settingsFocusRequest, setSettingsFocusRequest] = useState(0)
+  const [backfillFocusRequest, setBackfillFocusRequest] = useState(0)
+  const [reportResetRequest, setReportResetRequest] = useState(0)
+  const [fillMissingDaysRequest, setFillMissingDaysRequest] = useState(0)
+  const [dismissedCurrentMonthReminderMonthKey, setDismissedCurrentMonthReminderMonthKey] =
+    useState('')
   const [session, setSession] = useState<Session | null>(null)
   const [isSigningIn, setIsSigningIn] = useState(false)
   const [isSigningOut, setIsSigningOut] = useState(false)
+  const [isUnsavedReportModalOpen, setIsUnsavedReportModalOpen] = useState(false)
+  const [isSummaryConflictWarningOpen, setIsSummaryConflictWarningOpen] = useState(false)
+  const [isFutureReportWarningOpen, setIsFutureReportWarningOpen] = useState(false)
+  const [pendingSummaryConflictSaveEntries, setPendingSummaryConflictSaveEntries] = useState<
+    DailyEntry[] | null
+  >(null)
+  const [pendingFutureSaveEntries, setPendingFutureSaveEntries] = useState<DailyEntry[] | null>(null)
+  const [pendingScreen, setPendingScreen] = useState<Screen | null>(null)
   const [toastErrorMessage, setToastErrorMessage] = useState('')
-
-  useEffect(() => {
-    try {
-      const storedValue = window.localStorage.getItem(STORAGE_KEY)
-      if (storedValue) {
-        const parsedLocalState = normalizeStoredState(JSON.parse(storedValue))
-        setLocalStateForMigration(parsedLocalState)
-        setCurrentScreen(parsedLocalState.currentScreen)
-        setEntries(parsedLocalState.entries)
-        setMonthlySummaries(parsedLocalState.monthlySummaries)
-        setSettings(parsedLocalState.settings)
-      }
-    } catch {
-      window.localStorage.removeItem(STORAGE_KEY)
-    } finally {
-      setHasLoadedLocalState(true)
-    }
-  }, [])
+  const hasUnsavedReportChanges =
+    reportDraftEntries !== null && !areEntriesEqual(reportDraftEntries, entries)
 
   useEffect(() => {
     let isActive = true
@@ -140,13 +190,14 @@ export default function Home() {
   useEffect(() => {
     if (!hasCheckedSession || !session) {
       setHasLoadedRemoteState(false)
+      setDisplayName(undefined)
       return
     }
 
     let isActive = true
     setHasLoadedRemoteState(false)
 
-    void loadRemoteAppData(localStateForMigration)
+    void loadRemoteAppData()
       .then((remoteData) => {
         if (!isActive) {
           return
@@ -155,6 +206,7 @@ export default function Home() {
         setEntries(remoteData.entries)
         setMonthlySummaries(remoteData.monthlySummaries)
         setSettings(remoteData.settings)
+        setDisplayName(remoteData.displayName)
         setHasLoadedRemoteState(true)
       })
       .catch((error) => {
@@ -163,28 +215,28 @@ export default function Home() {
           return
         }
 
+        setDisplayName(undefined)
         setHasLoadedRemoteState(true)
       })
 
     return () => {
       isActive = false
     }
-  }, [hasCheckedSession, session, localStateForMigration])
+  }, [hasCheckedSession, session])
 
   useEffect(() => {
-    if (!hasLoadedLocalState) {
+    const userId = session?.user?.id
+
+    if (!userId) {
+      setDismissedCurrentMonthReminderMonthKey('')
       return
     }
 
-    const stateToStore: StoredAppState = {
-      currentScreen,
-      entries,
-      monthlySummaries,
-      settings,
-    }
-
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToStore))
-  }, [currentScreen, entries, monthlySummaries, settings, hasLoadedLocalState])
+    const dismissals = getUserOnboardingDismissals(userId)
+    setDismissedCurrentMonthReminderMonthKey(
+      dismissals.dismissedCurrentMonthReminderMonthKey ?? '',
+    )
+  }, [session])
 
   useEffect(() => {
     if (!hasLoadedRemoteState) {
@@ -197,6 +249,21 @@ export default function Home() {
   }, [entries, hasLoadedRemoteState])
 
   useEffect(() => {
+    if (currentScreen !== 'daily-log') {
+      return
+    }
+
+    if (reportDraftEntries === null) {
+      setReportDraftEntries(cloneEntries(entries))
+      return
+    }
+
+    if (!hasUnsavedReportChanges && !areEntriesEqual(reportDraftEntries, entries)) {
+      setReportDraftEntries(cloneEntries(entries))
+    }
+  }, [currentScreen, entries, hasUnsavedReportChanges, reportDraftEntries])
+
+  useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' })
   }, [currentScreen])
 
@@ -204,13 +271,110 @@ export default function Home() {
     console.log('[Financial Goal] currentScreen changed:', currentScreen)
   }, [currentScreen])
 
-  const handleAddEntry = (entry: DailyEntry) => {
-    setEntries((previousEntries) => [entry, ...previousEntries])
-    setCurrentScreen('dashboard')
+  const handleUpsertEntry = (entry: DailyEntry) => {
+    setReportDraftEntries((previousEntries) => {
+      const draftEntries = previousEntries ?? cloneEntries(entries)
+
+      return [
+      entry,
+      ...draftEntries.filter((previousEntry) => previousEntry.date !== entry.date),
+      ]
+    })
+  }
+
+  const handleRemoveEntryForDate = (dateKey: string) => {
+    setReportDraftEntries((previousEntries) => {
+      const draftEntries = previousEntries ?? cloneEntries(entries)
+      return draftEntries.filter((previousEntry) => previousEntry.date !== dateKey)
+    })
+  }
+
+  const proceedToScreen = (screen: Screen) => {
+    if (screen === 'daily-log') {
+      setReportDraftEntries(cloneEntries(entries))
+      setReportResetRequest((currentValue) => currentValue + 1)
+    }
+
+    setCurrentScreen(screen)
+  }
+
+  const commitReportEntries = (entriesToSave: DailyEntry[]) => {
+    setEntries(cloneEntries(entriesToSave))
+    setReportDraftEntries(cloneEntries(entriesToSave))
+  }
+
+  const finishSavingReportEntries = (entriesToSave: DailyEntry[]) => {
+    if (hasFutureDatedEntries(entriesToSave, todayDateKey)) {
+      setPendingFutureSaveEntries(cloneEntries(entriesToSave))
+      setIsFutureReportWarningOpen(true)
+      return false
+    }
+
+    commitReportEntries(entriesToSave)
+    return true
+  }
+
+  const handleSaveReportEntries = (nextEntries?: DailyEntry[]) => {
+    const entriesToSave = nextEntries ?? reportDraftEntries
+
+    if (entriesToSave === null || !entriesToSave) {
+      return true
+    }
+
+    if (getNewSummaryConflictMonthKeys(entries, entriesToSave, monthlySummaries).length > 0) {
+      setPendingSummaryConflictSaveEntries(cloneEntries(entriesToSave))
+      setIsSummaryConflictWarningOpen(true)
+      return false
+    }
+
+    return finishSavingReportEntries(entriesToSave)
+  }
+
+  const handleDiscardReportEntries = () => {
+    setReportDraftEntries(cloneEntries(entries))
   }
 
   const handleScreenChange = (screen: Screen) => {
-    setCurrentScreen(screen)
+    if (screen === currentScreen) {
+      return
+    }
+
+    if (currentScreen === 'daily-log' && screen !== 'daily-log' && hasUnsavedReportChanges) {
+      setPendingScreen(screen)
+      setIsUnsavedReportModalOpen(true)
+      return
+    }
+
+    proceedToScreen(screen)
+  }
+
+  const handleOpenConfigurationSetup = () => {
+    setSettingsFocusRequest((currentValue) => currentValue + 1)
+    setCurrentScreen('configuration')
+  }
+
+  const handleAddPreviousMonths = () => {
+    setBackfillFocusRequest((currentValue) => currentValue + 1)
+    setCurrentScreen('configuration')
+  }
+
+  const handleFillMissingDays = () => {
+    setFillMissingDaysRequest((currentValue) => currentValue + 1)
+    setCurrentScreen('daily-log')
+  }
+
+  const handleDismissCurrentMonthReminder = () => {
+    const userId = session?.user?.id
+
+    if (!userId) {
+      return
+    }
+
+    const currentMonthKey = toMonthKey(new Date())
+    setDismissedCurrentMonthReminderMonthKey(currentMonthKey)
+    updateUserOnboardingDismissals(userId, {
+      dismissedCurrentMonthReminderMonthKey: currentMonthKey,
+    })
   }
 
   const handleSaveConfiguration = async (
@@ -225,7 +389,6 @@ export default function Home() {
     setSettings(nextSettings)
     setMonthlySummaries(nextMonthlySummaries)
   }
-
   const handleSignIn = async (email: string, password: string) => {
     if (!hasSupabaseConfig()) {
       setToastErrorMessage(
@@ -271,25 +434,62 @@ export default function Home() {
     if (currentScreen === 'dashboard') {
       return (
         <Dashboard
+          displayName={displayName}
           entries={entries}
+          isCurrentMonthReminderDismissed={
+            dismissedCurrentMonthReminderMonthKey === toMonthKey(new Date())
+          }
           monthlySummaries={monthlySummaries}
+          onOpenConfigurationSetup={handleOpenConfigurationSetup}
+          onAddPreviousMonths={handleAddPreviousMonths}
+          onDismissCurrentMonthReminder={handleDismissCurrentMonthReminder}
+          onFillMissingDays={handleFillMissingDays}
           settings={settings}
         />
       )
     }
 
     if (currentScreen === 'daily-log') {
-      return <DailyLog entries={entries} settings={settings} onAddEntry={handleAddEntry} />
+      return (
+        <DailyLog
+          entries={reportDraftEntries ?? entries}
+          fillMissingDaysRequest={fillMissingDaysRequest}
+          hasUnsavedChanges={hasUnsavedReportChanges}
+          onRemoveEntryForDate={handleRemoveEntryForDate}
+          onSaveEntries={handleSaveReportEntries}
+          reportResetRequest={reportResetRequest}
+          settings={settings}
+          onUpsertEntry={handleUpsertEntry}
+        />
+      )
     }
 
     return (
       <ConfigurationScreen
+        backfillFocusRequest={backfillFocusRequest}
+        entries={entries}
+        settingsFocusRequest={settingsFocusRequest}
         monthlySummaries={monthlySummaries}
         onSaveConfiguration={handleSaveConfiguration}
         settings={settings}
       />
     )
-  }, [currentScreen, entries, handleAddEntry, handleSaveConfiguration, monthlySummaries, settings])
+  }, [
+    currentScreen,
+    entries,
+    handleRemoveEntryForDate,
+    handleUpsertEntry,
+    handleOpenConfigurationSetup,
+    handleAddPreviousMonths,
+    handleDismissCurrentMonthReminder,
+    handleFillMissingDays,
+    dismissedCurrentMonthReminderMonthKey,
+    displayName,
+    handleSaveConfiguration,
+    monthlySummaries,
+    reportDraftEntries,
+    settings,
+  ])
 
   const isConfigured = hasSupabaseConfig()
 
@@ -345,8 +545,9 @@ export default function Home() {
             <div className="rounded-[1.9rem] border border-border bg-card p-5 shadow-sm">
               <p className="text-sm text-muted-foreground">Loading your data...</p>
             </div>
-          ) : null}
-          {activeScreen}
+          ) : (
+            activeScreen
+          )}
         </section>
       </main>
 
@@ -402,6 +603,98 @@ export default function Home() {
       </nav>
 
       <ErrorToast message={toastErrorMessage} onDismiss={() => setToastErrorMessage('')} />
+      <WarningModal
+        body="You have unsaved daily reports. Do you want to save them?"
+        isOpen={isUnsavedReportModalOpen}
+        onClose={() => {
+          setIsUnsavedReportModalOpen(false)
+          setPendingScreen(null)
+        }}
+        onPrimaryAction={() => {
+          setIsUnsavedReportModalOpen(false)
+          const wasSavedImmediately = handleSaveReportEntries()
+
+          if (wasSavedImmediately && pendingScreen) {
+            proceedToScreen(pendingScreen)
+            setPendingScreen(null)
+          }
+        }}
+        onSecondaryAction={() => {
+          handleDiscardReportEntries()
+          setIsUnsavedReportModalOpen(false)
+
+          if (pendingScreen) {
+            proceedToScreen(pendingScreen)
+            setPendingScreen(null)
+          }
+        }}
+        primaryActionLabel="Save"
+        secondaryActionLabel="Don't Save"
+        title="Unsaved daily reports"
+      />
+      <WarningModal
+        body="Adding a daily entry here will make daily entries the source of truth for this month. Your monthly summary will no longer be used for calculations unless all daily entries for that month are removed. This may change your dashboard forecasts and tax planning."
+        isOpen={isSummaryConflictWarningOpen}
+        onClose={() => {
+          setIsSummaryConflictWarningOpen(false)
+          setPendingSummaryConflictSaveEntries(null)
+          setPendingScreen(null)
+        }}
+        onPrimaryAction={() => {
+          const entriesToSave = pendingSummaryConflictSaveEntries
+          setIsSummaryConflictWarningOpen(false)
+          setPendingSummaryConflictSaveEntries(null)
+
+          if (!entriesToSave) {
+            return
+          }
+
+          const wasSavedImmediately = finishSavingReportEntries(entriesToSave)
+
+          if (wasSavedImmediately && pendingScreen) {
+            proceedToScreen(pendingScreen)
+            setPendingScreen(null)
+          }
+        }}
+        onSecondaryAction={() => {
+          setIsSummaryConflictWarningOpen(false)
+          setPendingSummaryConflictSaveEntries(null)
+          setPendingScreen(null)
+        }}
+        primaryActionLabel="Save daily entry"
+        secondaryActionLabel="Cancel"
+        title="This month already has a summary"
+      />
+      <WarningModal
+        body="You have one or more daily reports on future dates. They can still be saved, but your dashboard may look ahead before those days actually happen."
+        isOpen={isFutureReportWarningOpen}
+        onClose={() => {
+          setIsFutureReportWarningOpen(false)
+          setPendingFutureSaveEntries(null)
+          setPendingScreen(null)
+        }}
+        onPrimaryAction={() => {
+          if (pendingFutureSaveEntries) {
+            commitReportEntries(pendingFutureSaveEntries)
+          }
+
+          setIsFutureReportWarningOpen(false)
+          setPendingFutureSaveEntries(null)
+
+          if (pendingScreen) {
+            proceedToScreen(pendingScreen)
+            setPendingScreen(null)
+          }
+        }}
+        onSecondaryAction={() => {
+          setIsFutureReportWarningOpen(false)
+          setPendingFutureSaveEntries(null)
+          setPendingScreen(null)
+        }}
+        primaryActionLabel="Save anyway"
+        secondaryActionLabel="Go back"
+        title="Future day reports included"
+      />
     </div>
   )
 }
