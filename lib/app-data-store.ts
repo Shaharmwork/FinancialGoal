@@ -1,31 +1,43 @@
 import { sortMonthlySummaries } from './calculations'
 import {
-  defaultStoredState,
   normalizeEntry,
   normalizeMonthlySummary,
   normalizeSettings,
+  starterStoredState,
 } from './default-state'
 import { getCurrentSession, getSupabaseClient, hasSupabaseConfig } from './supabase'
-import type { DailyEntry, MonthlySummary, Settings, StoredAppState } from './types'
+import type { DailyEntry, MonthlySummary, Settings } from './types'
 
-type RemoteAppData = Pick<StoredAppState, 'entries' | 'monthlySummaries' | 'settings'>
+interface RemoteAppData {
+  entries: DailyEntry[]
+  monthlySummaries: MonthlySummary[]
+  settings: Settings
+}
 
-const SETTINGS_ROW_ID = 'default'
+export interface LoadedRemoteAppData extends RemoteAppData {
+  displayName?: string
+  isNewUser: boolean
+}
 
 interface AppSettingsRow {
-  target_net_month?: number
-  weekly_hours_target?: number
-  default_shift_income?: number
-  default_shift_hours?: number
-  spouse_monthly_income?: number
-  reserve_buffer_percent?: number
-  qualifies_for_self_employed_deduction?: boolean
+  target_net_month?: number | null
+  weekly_hours_target?: number | null
+  default_shift_income?: number | null
+  default_shift_hours?: number | null
+  spouse_monthly_income?: number | null
+  reserve_buffer_percent?: number | null
+  qualifies_for_self_employed_deduction?: boolean | null
   user_id?: string
+}
+
+interface ProfileRow {
+  display_name?: string | null
 }
 
 interface DailyEntryRow {
   id: string
   date: string
+  day_status?: string | null
   hours: number
   invoiced_income: number
   paid_income: number
@@ -44,11 +56,11 @@ interface MonthlySummaryRow {
   user_id?: string | null
 }
 
-function getSeedData(localState: StoredAppState | null): RemoteAppData {
+function getStarterData(): RemoteAppData {
   return {
-    entries: localState?.entries ?? defaultStoredState.entries,
-    monthlySummaries: localState?.monthlySummaries ?? defaultStoredState.monthlySummaries,
-    settings: localState?.settings ?? defaultStoredState.settings,
+    entries: starterStoredState.entries,
+    monthlySummaries: starterStoredState.monthlySummaries,
+    settings: starterStoredState.settings,
   }
 }
 
@@ -65,7 +77,7 @@ async function getRequiredUserId() {
 
 function mapSettingsFromRow(row: AppSettingsRow | null): Settings {
   if (!row) {
-    return defaultStoredState.settings
+    return starterStoredState.settings
   }
 
   return normalizeSettings({
@@ -83,7 +95,6 @@ function mapSettingsToRow(settings: Settings, userId: string) {
   return {
     default_shift_hours: settings.defaultShiftHours,
     default_shift_income: settings.defaultShiftIncome,
-    id: SETTINGS_ROW_ID,
     user_id: userId,
     qualifies_for_self_employed_deduction: settings.qualifiesForSelfEmployedDeduction,
     reserve_buffer_percent: settings.reserveBufferPercent,
@@ -93,9 +104,34 @@ function mapSettingsToRow(settings: Settings, userId: string) {
   }
 }
 
+function hasAnyUserData({
+  hasSettingsRow,
+  entries,
+  monthlySummaries,
+}: {
+  hasSettingsRow: boolean
+  entries: DailyEntry[]
+  monthlySummaries: MonthlySummary[]
+}) {
+  return hasSettingsRow || entries.length > 0 || monthlySummaries.length > 0
+}
+
+function isNewUser({
+  hasSettingsRow,
+  entries,
+  monthlySummaries,
+}: {
+  hasSettingsRow: boolean
+  entries: DailyEntry[]
+  monthlySummaries: MonthlySummary[]
+}) {
+  return !hasSettingsRow && entries.length === 0 && monthlySummaries.length === 0
+}
+
 function mapEntryFromRow(row: DailyEntryRow): DailyEntry | null {
   return normalizeEntry({
     date: row.date,
+    dayStatus: row.day_status,
     expenses: row.expenses,
     hours: row.hours,
     id: row.id,
@@ -109,6 +145,7 @@ function mapEntryFromRow(row: DailyEntryRow): DailyEntry | null {
 function mapEntryToRow(entry: DailyEntry, userId: string) {
   return {
     date: entry.date,
+    day_status: entry.dayStatus ?? 'worked',
     expenses: entry.expenses,
     hours: entry.hours,
     id: entry.id,
@@ -194,7 +231,7 @@ async function replaceMonthlySummaries(monthlySummaries: MonthlySummary[]) {
     const upsertResult = await supabase
       .from('monthly_summaries')
       .upsert(monthlySummaries.map((summary) => mapMonthlySummaryToRow(summary, userId)), {
-        onConflict: 'month_key',
+        onConflict: 'user_id,month_key',
       })
 
     if (upsertResult.error) {
@@ -230,35 +267,44 @@ async function saveSettingsInternal(settings: Settings) {
   }
   const userId = await getRequiredUserId()
 
-  const result = await supabase.from('app_settings').upsert(mapSettingsToRow(settings, userId), {
-    onConflict: 'id',
-  })
+  const result = await supabase
+    .from('app_settings')
+    .upsert(mapSettingsToRow(settings, userId), { onConflict: 'user_id' })
 
   if (result.error) {
     throw result.error
   }
 }
 
-async function seedRemoteData(seedData: RemoteAppData) {
-  await saveSettingsInternal(seedData.settings)
-  await replaceDailyEntries(seedData.entries)
-  await replaceMonthlySummaries(seedData.monthlySummaries)
-}
-
-export async function loadRemoteAppData(localState: StoredAppState | null): Promise<RemoteAppData> {
+export async function loadRemoteAppData(): Promise<LoadedRemoteAppData> {
   if (!hasSupabaseConfig()) {
-    return getSeedData(localState)
+    return {
+      ...getStarterData(),
+      displayName: undefined,
+      isNewUser: false,
+    }
   }
 
   const supabase = getSupabaseClient()
   if (!supabase) {
-    return getSeedData(localState)
+    return {
+      ...getStarterData(),
+      displayName: undefined,
+      isNewUser: false,
+    }
   }
 
-  const [settingsResult, entriesResult, monthlySummariesResult] = await Promise.all([
-    supabase.from('app_settings').select('*').eq('id', SETTINGS_ROW_ID).maybeSingle(),
+  const userId = await getRequiredUserId()
+
+  const [settingsResult, entriesResult, monthlySummariesResult, profileResult] = await Promise.all([
+    supabase
+      .from('app_settings')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle(),
     supabase.from('daily_entries').select('*').order('date', { ascending: false }),
     supabase.from('monthly_summaries').select('*').order('month_key', { ascending: true }),
+    supabase.from('profiles').select('display_name').eq('id', userId).maybeSingle(),
   ])
 
   if (settingsResult.error) {
@@ -273,6 +319,10 @@ export async function loadRemoteAppData(localState: StoredAppState | null): Prom
     throw monthlySummariesResult.error
   }
 
+  if (profileResult.error) {
+    throw profileResult.error
+  }
+
   const remoteEntries =
     entriesResult.data
       ?.map((row) => mapEntryFromRow(row as DailyEntryRow))
@@ -284,19 +334,35 @@ export async function loadRemoteAppData(localState: StoredAppState | null): Prom
       .filter((summary): summary is MonthlySummary => summary !== null) ?? [],
   )
 
-  const hasRemoteData =
-    settingsResult.data !== null || remoteEntries.length > 0 || remoteMonthlySummaries.length > 0
+  const hasSettingsRow = settingsResult.data !== null
+  const hasUserData = hasAnyUserData({
+    hasSettingsRow,
+    entries: remoteEntries,
+    monthlySummaries: remoteMonthlySummaries,
+  })
+  const displayName =
+    typeof (profileResult.data as ProfileRow | null)?.display_name === 'string'
+      ? ((profileResult.data as ProfileRow | null)?.display_name ?? undefined)
+      : undefined
 
-  if (!hasRemoteData) {
-    const seedData = getSeedData(localState)
-    await seedRemoteData(seedData)
-    return seedData
+  if (!hasUserData) {
+    return {
+      ...getStarterData(),
+      displayName,
+      isNewUser: true,
+    }
   }
 
   return {
+    displayName,
     entries: remoteEntries,
     monthlySummaries: remoteMonthlySummaries,
     settings: mapSettingsFromRow(settingsResult.data as AppSettingsRow | null),
+    isNewUser: isNewUser({
+      hasSettingsRow,
+      entries: remoteEntries,
+      monthlySummaries: remoteMonthlySummaries,
+    }),
   }
 }
 

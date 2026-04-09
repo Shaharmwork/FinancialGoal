@@ -12,6 +12,16 @@ export const defaultSettings: Settings = {
   qualifiesForSelfEmployedDeduction: true,
 }
 
+export const emptySettings: Settings = {
+  targetNetMonth: null,
+  spouseMonthlyIncome: 0,
+  defaultShiftIncome: null,
+  defaultShiftHours: null,
+  weeklyHoursTarget: null,
+  reserveBufferPercent: null,
+  qualifiesForSelfEmployedDeduction: null,
+}
+
 export const defaultMonthlySummaries: MonthlySummary[] = [
   {
     monthKey: '2026-01',
@@ -43,6 +53,13 @@ export const defaultStoredState: StoredAppState = {
   settings: defaultSettings,
 }
 
+export const starterStoredState: StoredAppState = {
+  currentScreen: 'dashboard',
+  entries: [],
+  monthlySummaries: [],
+  settings: emptySettings,
+}
+
 type UnknownRecord = Record<string, unknown>
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -53,12 +70,20 @@ function readNumber(value: unknown, fallback: number) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
+function readNullableNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
 function readString(value: unknown) {
   return typeof value === 'string' ? value : undefined
 }
 
 function readBoolean(value: unknown, fallback: boolean) {
   return typeof value === 'boolean' ? value : fallback
+}
+
+function readNullableBoolean(value: unknown) {
+  return typeof value === 'boolean' ? value : null
 }
 
 function normalizeScreen(value: unknown): Screen {
@@ -69,31 +94,18 @@ function normalizeScreen(value: unknown): Screen {
 
 export function normalizeSettings(value: unknown): Settings {
   if (!isRecord(value)) {
-    return defaultSettings
+    return emptySettings
   }
 
   return {
-    targetNetMonth: readNumber(
-      value.targetNetMonth ?? value.monthlyNetGoal,
-      defaultSettings.targetNetMonth,
-    ),
-    spouseMonthlyIncome: readNumber(
-      value.spouseMonthlyIncome,
-      defaultSettings.spouseMonthlyIncome,
-    ),
-    defaultShiftIncome: readNumber(value.defaultShiftIncome, defaultSettings.defaultShiftIncome),
-    defaultShiftHours: readNumber(value.defaultShiftHours, defaultSettings.defaultShiftHours),
-    weeklyHoursTarget: readNumber(
-      value.weeklyHoursTarget ?? value.weeklyHoursGoal,
-      defaultSettings.weeklyHoursTarget,
-    ),
-    reserveBufferPercent: readNumber(
-      value.reserveBufferPercent,
-      defaultSettings.reserveBufferPercent,
-    ),
-    qualifiesForSelfEmployedDeduction: readBoolean(
+    targetNetMonth: readNullableNumber(value.targetNetMonth ?? value.monthlyNetGoal),
+    spouseMonthlyIncome: readNumber(value.spouseMonthlyIncome, emptySettings.spouseMonthlyIncome),
+    defaultShiftIncome: readNullableNumber(value.defaultShiftIncome),
+    defaultShiftHours: readNullableNumber(value.defaultShiftHours),
+    weeklyHoursTarget: readNullableNumber(value.weeklyHoursTarget ?? value.weeklyHoursGoal),
+    reserveBufferPercent: readNullableNumber(value.reserveBufferPercent),
+    qualifiesForSelfEmployedDeduction: readNullableBoolean(
       value.qualifiesForSelfEmployedDeduction,
-      defaultSettings.qualifiesForSelfEmployedDeduction,
     ),
   }
 }
@@ -126,6 +138,7 @@ export function normalizeEntry(value: unknown): DailyEntry | null {
   return {
     id,
     date,
+    dayStatus: value.dayStatus === 'no_work' ? 'no_work' : 'worked',
     hours,
     invoicedIncome,
     paidIncome,

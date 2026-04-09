@@ -1,8 +1,7 @@
 create extension if not exists pgcrypto;
 
 create table if not exists public.app_settings (
-  id text primary key default 'default',
-  user_id uuid not null,
+  user_id uuid primary key,
   target_net_month numeric not null default 0,
   weekly_hours_target numeric not null default 0,
   default_shift_income numeric not null default 0,
@@ -17,6 +16,7 @@ create table if not exists public.daily_entries (
   id text primary key,
   user_id uuid not null,
   date text not null,
+  day_status text not null default 'worked',
   hours numeric not null default 0,
   invoiced_income numeric not null default 0,
   paid_income numeric not null default 0,
@@ -27,16 +27,24 @@ create table if not exists public.daily_entries (
   updated_at timestamptz not null default timezone('utc', now())
 );
 
+alter table public.daily_entries
+  drop constraint if exists daily_entries_day_status_check;
+
+alter table public.daily_entries
+  add constraint daily_entries_day_status_check
+  check (day_status in ('worked', 'no_work'));
+
 create table if not exists public.monthly_summaries (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null,
-  month_key text not null unique,
+  month_key text not null,
   hours numeric not null default 0,
   invoiced_income numeric not null default 0,
   paid_income numeric not null default 0,
   expenses numeric not null default 0,
   created_at timestamptz not null default timezone('utc', now()),
-  updated_at timestamptz not null default timezone('utc', now())
+  updated_at timestamptz not null default timezone('utc', now()),
+  unique (user_id, month_key)
 );
 
 create or replace function public.set_updated_at()
