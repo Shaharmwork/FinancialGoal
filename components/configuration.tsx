@@ -13,7 +13,6 @@ import {
 } from 'react'
 import { InfoHelp } from '@/components/info-help'
 import { WarningModal } from '@/components/warning-modal'
-import { sortMonthlySummaries } from '@/lib/calculations'
 import { defaultSettings } from '@/lib/default-state'
 import type { DailyEntry, MonthlySummary, Settings } from '@/lib/types'
 
@@ -30,6 +29,7 @@ interface FieldProps {
   helpTitle?: string
   infoBody?: string
   inputRef?: RefObject<HTMLInputElement | null>
+  invalid?: boolean
   label: string
   value: number | null
   onChange: (value: number | null) => void
@@ -45,6 +45,7 @@ interface FieldProps {
 interface ToggleFieldProps {
   helpTitle?: string
   infoBody?: string
+  invalid?: boolean
   label: string
   checked: boolean | null
   onChange: (checked: boolean) => void
@@ -62,6 +63,18 @@ interface PendingDeleteMonthSummary {
   index: number
   monthKey: string
 }
+
+type SummaryFieldKey = 'monthKey' | 'hours' | 'invoicedIncome'
+type SettingsFieldKey =
+  | 'targetNetMonth'
+  | 'weeklyHoursTarget'
+  | 'defaultShiftIncome'
+  | 'defaultShiftHours'
+  | 'reserveBufferPercent'
+  | 'qualifiesForSelfEmployedDeduction'
+
+type InvalidSettingsState = Partial<Record<SettingsFieldKey, boolean>>
+type InvalidSummaryFieldsState = Record<string, Partial<Record<SummaryFieldKey, boolean>>>
 
 function parseNumber(value: string) {
   const parsed = Number(value)
@@ -158,38 +171,149 @@ function getNextBackfillMonthOption(
 
 function getMissingBaseConfigurationFields(settings: Settings) {
   const missingFields: string[] = []
+  const missingFieldKeys: SettingsFieldKey[] = []
 
   if (!(typeof settings.targetNetMonth === 'number' && settings.targetNetMonth > 0)) {
     missingFields.push('target net month')
+    missingFieldKeys.push('targetNetMonth')
   }
 
   if (!(typeof settings.weeklyHoursTarget === 'number' && settings.weeklyHoursTarget > 0)) {
     missingFields.push('weekly hours target')
+    missingFieldKeys.push('weeklyHoursTarget')
   }
 
   if (!(typeof settings.defaultShiftIncome === 'number' && settings.defaultShiftIncome > 0)) {
     missingFields.push('default invoice amount')
+    missingFieldKeys.push('defaultShiftIncome')
   }
 
   if (!(typeof settings.defaultShiftHours === 'number' && settings.defaultShiftHours > 0)) {
     missingFields.push('default shift hours')
+    missingFieldKeys.push('defaultShiftHours')
   }
 
   if (!(typeof settings.reserveBufferPercent === 'number' && settings.reserveBufferPercent >= 0)) {
     missingFields.push('reserve buffer percentage')
+    missingFieldKeys.push('reserveBufferPercent')
   }
 
   if (typeof settings.qualifiesForSelfEmployedDeduction !== 'boolean') {
     missingFields.push('self-employed deduction setting')
+    missingFieldKeys.push('qualifiesForSelfEmployedDeduction')
   }
 
-  return missingFields
+  return {
+    missingFieldKeys,
+    missingFields,
+  }
+}
+
+function getSummaryRowKey(summary: MonthlySummary, index: number) {
+  return `${summary.monthKey || 'draft'}-${index}`
+}
+
+function getInvalidSummaryFields(
+  summary: MonthlySummary,
+): Partial<Record<SummaryFieldKey, boolean>> {
+  const invalidFields: Partial<Record<SummaryFieldKey, boolean>> = {}
+
+  if (!summary.monthKey) {
+    invalidFields.monthKey = true
+  }
+
+  const hasAnyValue =
+    summary.hours > 0 ||
+    summary.invoicedIncome > 0 ||
+    summary.paidIncome > 0 ||
+    summary.expenses > 0
+
+  if (!hasAnyValue) {
+    invalidFields.hours = true
+    invalidFields.invoicedIncome = true
+    return invalidFields
+  }
+
+  const isExpenseOnlySummary =
+    summary.expenses > 0 &&
+    summary.hours <= 0 &&
+    summary.invoicedIncome <= 0 &&
+    summary.paidIncome <= 0
+
+  if (!isExpenseOnlySummary) {
+    if (!(summary.hours > 0)) {
+      invalidFields.hours = true
+    }
+
+    if (!(summary.invoicedIncome > 0)) {
+      invalidFields.invoicedIncome = true
+    }
+  }
+
+  return invalidFields
+}
+
+function getInvalidSummaryFieldMap(
+  summaries: MonthlySummary[],
+): InvalidSummaryFieldsState {
+  return summaries.reduce<InvalidSummaryFieldsState>((currentValue, summary, index) => {
+    const invalidFields = getInvalidSummaryFields(summary)
+
+    if (Object.keys(invalidFields).length > 0) {
+      currentValue[getSummaryRowKey(summary, index)] = invalidFields
+    }
+
+    return currentValue
+  }, {})
+}
+
+function getConfigurationValidationIssue({
+  hasInvalidBaseConfiguration,
+  hasInvalidMonthSummaries,
+}: {
+  hasInvalidBaseConfiguration: boolean
+  hasInvalidMonthSummaries: boolean
+}): MonthSummaryValidationIssue {
+  if (hasInvalidBaseConfiguration && hasInvalidMonthSummaries) {
+    return {
+      title: 'Complete required fields',
+      message:
+        'Some required base configuration fields and month summary fields still need attention. Fill the highlighted fields before saving.',
+    }
+  }
+
+  if (hasInvalidBaseConfiguration) {
+    return {
+      title: 'Complete base configuration',
+      message:
+        'Some required base configuration fields are still missing or invalid. Fill the highlighted fields before saving.',
+    }
+  }
+
+  return {
+    title: 'Complete month summary fields',
+    message:
+      'Some month summaries still need required fields. Worked month summaries need both hours and invoiced income. Expense-only month summaries are allowed. If a month truly has zero totals, remove it completely instead.',
+  }
+}
+
+function isIncompleteDraftSummary(summary: MonthlySummary) {
+  return Object.keys(getInvalidSummaryFields(summary)).length > 0
+}
+
+function isIncompleteNewSummary(summary: MonthlySummary, savedMonthKeys: Set<string>) {
+  if (savedMonthKeys.has(summary.monthKey)) {
+    return false
+  }
+
+  return isIncompleteDraftSummary(summary)
 }
 
 function SettingField({
   helpTitle,
   infoBody,
   inputRef,
+  invalid = false,
   label,
   value,
   onChange,
@@ -215,7 +339,7 @@ function SettingField({
             onClick={onSetDefault}
             type="button"
           >
-            Set Default
+            Use Default
           </button>
         ) : null}
       </span>
@@ -227,7 +351,9 @@ function SettingField({
         ) : null}
         <input
           ref={inputRef}
-          className={`w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60 ${
+          className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
+            invalid ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500' : 'border-border focus:border-primary'
+          } ${
             prefix ? 'pl-8' : ''
           } ${suffix ? 'pr-8' : ''}`}
           disabled={disabled}
@@ -251,6 +377,7 @@ function SettingField({
 function ToggleField({
   helpTitle,
   infoBody,
+  invalid = false,
   label,
   checked,
   onChange,
@@ -272,16 +399,16 @@ function ToggleField({
             onClick={onSetDefault}
             type="button"
           >
-            Set Default
+            Use Default
           </button>
         ) : null}
       </span>
       <div className="grid grid-cols-2 gap-2">
         <button
           aria-pressed={checked === true}
-          className={`rounded-2xl border border-border px-4 py-3 text-left text-base transition disabled:cursor-not-allowed disabled:opacity-60 ${
+          className={`rounded-2xl border px-4 py-3 text-left text-base transition disabled:cursor-not-allowed disabled:opacity-60 ${
             checked === true ? 'bg-primary text-primary-foreground' : 'bg-background text-foreground'
-          }`}
+          } ${invalid && checked !== true ? 'border-rose-300 bg-rose-50/50' : 'border-border'}`}
           disabled={disabled}
           onClick={() => onChange(true)}
           type="button"
@@ -291,9 +418,9 @@ function ToggleField({
         </button>
         <button
           aria-pressed={checked === false}
-          className={`rounded-2xl border border-border px-4 py-3 text-left text-base transition disabled:cursor-not-allowed disabled:opacity-60 ${
+          className={`rounded-2xl border px-4 py-3 text-left text-base transition disabled:cursor-not-allowed disabled:opacity-60 ${
             checked === false ? 'bg-primary text-primary-foreground' : 'bg-background text-foreground'
-          }`}
+          } ${invalid && checked !== false ? 'border-rose-300 bg-rose-50/50' : 'border-border'}`}
           disabled={disabled}
           onClick={() => onChange(false)}
           type="button"
@@ -328,6 +455,8 @@ export function Configuration({
   const [warningModalIssue, setWarningModalIssue] = useState<MonthSummaryValidationIssue | null>(
     null,
   )
+  const [invalidSettingFields, setInvalidSettingFields] = useState<InvalidSettingsState>({})
+  const [invalidSummaryFields, setInvalidSummaryFields] = useState<InvalidSummaryFieldsState>({})
   const [pendingDeleteMonthSummary, setPendingDeleteMonthSummary] =
     useState<PendingDeleteMonthSummary | null>(null)
   const settingsSectionRef = useRef<HTMLElement | null>(null)
@@ -336,7 +465,7 @@ export function Configuration({
   const addMonthButtonRef = useRef<HTMLButtonElement | null>(null)
   const monthCardRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const monthInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
-  const [pendingMonthFocusKey, setPendingMonthFocusKey] = useState<string | null>(null)
+  const [pendingMonthFocusRowKey, setPendingMonthFocusRowKey] = useState<string | null>(null)
 
   useEffect(() => {
     setDraftSettings(settings)
@@ -466,12 +595,12 @@ export function Configuration({
   }
 
   useEffect(() => {
-    if (!pendingMonthFocusKey) {
+    if (!pendingMonthFocusRowKey) {
       return
     }
 
-    const focusTarget = monthInputRefs.current[pendingMonthFocusKey]
-    const cardTarget = monthCardRefs.current[pendingMonthFocusKey]
+    const focusTarget = monthInputRefs.current[pendingMonthFocusRowKey]
+    const cardTarget = monthCardRefs.current[pendingMonthFocusRowKey]
 
     if (!focusTarget) {
       return
@@ -482,8 +611,8 @@ export function Configuration({
       block: 'center',
     })
     focusTarget.focus()
-    setPendingMonthFocusKey(null)
-  }, [pendingMonthFocusKey, sortedDraftSummaries])
+    setPendingMonthFocusRowKey(null)
+  }, [pendingMonthFocusRowKey, sortedDraftSummaries])
 
   const resetFormMessage = () => {
     if (!formMessage && !isErrorMessage) {
@@ -496,6 +625,13 @@ export function Configuration({
 
   const updateField = (key: keyof Settings, value: Settings[keyof Settings]) => {
     resetFormMessage()
+    if (key in invalidSettingFields) {
+      setInvalidSettingFields((currentValue) => {
+        const nextValue = { ...currentValue }
+        delete nextValue[key as SettingsFieldKey]
+        return nextValue
+      })
+    }
     setDraftSettings({
       ...draftSettings,
       [key]: value,
@@ -506,15 +642,9 @@ export function Configuration({
     JSON.stringify(draftSettings) !== JSON.stringify(settings) ||
     JSON.stringify(sortedDraftSummaries) !== JSON.stringify(sortedSavedSummaries)
 
-  const unfinishedNewSummary = sortedDraftSummaries.find((summary) => {
-    return (
-      !savedMonthKeys.has(summary.monthKey) &&
-      summary.hours === 0 &&
-      summary.invoicedIncome === 0 &&
-      summary.paidIncome === 0 &&
-      summary.expenses === 0
-    )
-  })
+  const unfinishedNewSummary = sortedDraftSummaries.find((summary) =>
+    isIncompleteNewSummary(summary, savedMonthKeys),
+  )
 
   const updateSummaryField = (
     index: number,
@@ -549,7 +679,9 @@ export function Configuration({
       }
     })
 
-    setDraftMonthlySummaries(sortMonthlySummariesNewestFirst(next))
+    const nextSortedSummaries = sortMonthlySummariesNewestFirst(next)
+    setDraftMonthlySummaries(nextSortedSummaries)
+    setInvalidSummaryFields(getInvalidSummaryFieldMap(nextSortedSummaries))
   }
 
   const addMonthSummary = () => {
@@ -564,7 +696,10 @@ export function Configuration({
       setIsErrorMessage(true)
       setFormMessage(blockedAddIssue.message)
       showWarningModal(blockedAddIssue)
-      setPendingMonthFocusKey(unfinishedNewSummary.monthKey)
+      const unfinishedIndex = sortedDraftSummaries.findIndex(
+        (summary) => summary === unfinishedNewSummary,
+      )
+      setPendingMonthFocusRowKey(getSummaryRowKey(unfinishedNewSummary, unfinishedIndex))
       return
     }
 
@@ -593,17 +728,21 @@ export function Configuration({
     }
 
     const nextSummaries = sortMonthlySummariesNewestFirst([...sortedDraftSummaries, nextSummary])
+    const nextFocusIndex = nextSummaries.findIndex((summary) => summary === nextSummary)
+    const nextFocusRowKey = getSummaryRowKey(nextSummary, nextFocusIndex)
+
     setDraftMonthlySummaries(nextSummaries)
-    setPendingMonthFocusKey(nextMonthKey)
+    setInvalidSummaryFields(getInvalidSummaryFieldMap(nextSummaries))
+    setPendingMonthFocusRowKey(nextFocusRowKey)
   }
 
   const removeMonthSummary = (index: number) => {
     resetFormMessage()
-    setDraftMonthlySummaries(
-      sortMonthlySummariesNewestFirst(
-        sortedDraftSummaries.filter((_, summaryIndex) => summaryIndex !== index),
-      ),
+    const nextSummaries = sortMonthlySummariesNewestFirst(
+      sortedDraftSummaries.filter((_, summaryIndex) => summaryIndex !== index),
     )
+    setDraftMonthlySummaries(nextSummaries)
+    setInvalidSummaryFields(getInvalidSummaryFieldMap(nextSummaries))
   }
 
   const requestRemoveMonthSummary = (index: number) => {
@@ -640,10 +779,49 @@ export function Configuration({
       return
     }
 
-    const missingBaseFields = getMissingBaseConfigurationFields(draftSettings)
-    if (missingBaseFields.length > 0) {
+    const { missingFieldKeys, missingFields } = getMissingBaseConfigurationFields(draftSettings)
+    const nextInvalidSummaryFields = getInvalidSummaryFieldMap(sortedDraftSummaries)
+    const incompleteSummaryRowKeys = Object.keys(nextInvalidSummaryFields)
+
+    setInvalidSettingFields(
+      missingFieldKeys.reduce<InvalidSettingsState>((currentValue, fieldKey) => {
+        currentValue[fieldKey] = true
+        return currentValue
+      }, {}),
+    )
+    setInvalidSummaryFields(nextInvalidSummaryFields)
+
+    if (missingFields.length > 0 || incompleteSummaryRowKeys.length > 0) {
+      const validationIssue = getConfigurationValidationIssue({
+        hasInvalidBaseConfiguration: missingFields.length > 0,
+        hasInvalidMonthSummaries: incompleteSummaryRowKeys.length > 0,
+      })
+
       setIsErrorMessage(true)
-      setFormMessage(`Complete base configuration before saving: ${missingBaseFields.join(', ')}.`)
+      setFormMessage(validationIssue.message)
+      showWarningModal(validationIssue)
+
+      if (missingFieldKeys.length > 0) {
+        settingsSectionRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        })
+        window.setTimeout(() => {
+          firstSettingsInputRef.current?.focus()
+        }, 180)
+      } else if (incompleteSummaryRowKeys.length > 0) {
+        const firstInvalidSummary = sortedDraftSummaries.find((summary, index) =>
+          incompleteSummaryRowKeys.includes(getSummaryRowKey(summary, index)),
+        )
+
+        if (firstInvalidSummary) {
+          const firstInvalidIndex = sortedDraftSummaries.findIndex(
+            (summary) => summary === firstInvalidSummary,
+          )
+          setPendingMonthFocusRowKey(getSummaryRowKey(firstInvalidSummary, firstInvalidIndex))
+        }
+      }
+
       return
     }
 
@@ -680,7 +858,6 @@ export function Configuration({
       seenMonthKeys.add(summary.monthKey)
     }
 
-    const savedMonthKeys = new Set(sortedSavedSummaries.map((summary) => summary.monthKey))
     const conflictingNewSummary = sortedDraftSummaries.find(
       (summary) => !savedMonthKeys.has(summary.monthKey) && entryMonthKeys.has(summary.monthKey),
     )
@@ -700,6 +877,8 @@ export function Configuration({
     setIsSaving(true)
     setFormMessage('')
     setIsErrorMessage(false)
+    setInvalidSettingFields({})
+    setInvalidSummaryFields({})
 
     try {
       await onSaveConfiguration(draftSettings, sortedDraftSummaries)
@@ -746,10 +925,11 @@ export function Configuration({
             helpTitle="Target net month"
             infoBody="Your monthly take-home goal. The dashboard uses this to work backward into the business profit you need for yearly pace and target tracking."
             inputRef={firstSettingsInputRef}
+            invalid={invalidSettingFields.targetNetMonth === true}
             label="Target Net Month"
             disabled={isSaving}
             onSetDefault={() => updateField('targetNetMonth', defaultSettings.targetNetMonth)}
-            placeholder={defaultSettings.targetNetMonth?.toString() ?? ''}
+            placeholder="0"
             value={draftSettings.targetNetMonth}
             onChange={(value) => updateField('targetNetMonth', value)}
             prefix="€"
@@ -757,10 +937,11 @@ export function Configuration({
           <SettingField
             helpTitle="Weekly hours target"
             infoBody="Your preferred work hours for a normal week. The dashboard compares logged hours against this target in the weekly planning card."
+            invalid={invalidSettingFields.weeklyHoursTarget === true}
             label="Hours I Want To Work Every Week"
             disabled={isSaving}
             onSetDefault={() => updateField('weeklyHoursTarget', defaultSettings.weeklyHoursTarget)}
-            placeholder={defaultSettings.weeklyHoursTarget?.toString() ?? ''}
+            placeholder="0"
             value={draftSettings.weeklyHoursTarget}
             onChange={(value) => updateField('weeklyHoursTarget', value)}
             step={0.25}
@@ -768,20 +949,22 @@ export function Configuration({
           <SettingField
             helpTitle="Default shift income"
             infoBody="This is the expected invoice amount for one standard configured shift. It is based on your default shift hours and default shift income, used as a suggested value when you log an entry, and you can override it per entry when needed."
+            invalid={invalidSettingFields.defaultShiftIncome === true}
             label="Default Invoice Amount"
             disabled={isSaving}
             onSetDefault={() => updateField('defaultShiftIncome', defaultSettings.defaultShiftIncome)}
-            placeholder={defaultSettings.defaultShiftIncome?.toFixed(2) ?? ''}
+            placeholder="0"
             value={draftSettings.defaultShiftIncome}
             onChange={(value) => updateField('defaultShiftIncome', value)}
             prefix="€"
             step={0.01}
           />
           <SettingField
+            invalid={invalidSettingFields.defaultShiftHours === true}
             label="Default Shift Hours"
             disabled={isSaving}
             onSetDefault={() => updateField('defaultShiftHours', defaultSettings.defaultShiftHours)}
-            placeholder={defaultSettings.defaultShiftHours?.toString() ?? ''}
+            placeholder="0"
             value={draftSettings.defaultShiftHours}
             onChange={(value) => updateField('defaultShiftHours', value)}
             step={0.25}
@@ -791,6 +974,7 @@ export function Configuration({
             infoBody="This is for a later combined household view on the dashboard. It does not change your own business tax calculation and is only for shared visibility."
             label="Spouse Monthly Income"
             disabled={isSaving}
+            placeholder="0"
             value={draftSettings.spouseMonthlyIncome}
             onChange={(value) => updateField('spouseMonthlyIncome', value)}
             prefix="€"
@@ -798,10 +982,11 @@ export function Configuration({
           <SettingField
             helpTitle="Reserve buffer percent"
             infoBody="This adds extra breathing room on top of the calculated tax estimate. The dashboard uses it to raise reserve targets so you can save a bit more safely."
+            invalid={invalidSettingFields.reserveBufferPercent === true}
             label="Reserve Buffer Percentage"
             disabled={isSaving}
             onSetDefault={() => updateField('reserveBufferPercent', defaultSettings.reserveBufferPercent)}
-            placeholder={defaultSettings.reserveBufferPercent?.toString() ?? ''}
+            placeholder="0"
             value={draftSettings.reserveBufferPercent}
             onChange={(value) => updateField('reserveBufferPercent', value)}
             suffix="%"
@@ -809,7 +994,8 @@ export function Configuration({
           />
           <ToggleField
             helpTitle="Self-employed deduction"
-            infoBody="This tells the tax calculation whether to include the self-employed deduction. In practice, one of the main checks is whether you worked enough hours during the year, so turn this on only when that likely applies."
+            infoBody="This tells the tax calculation whether to include the self-employed deduction. The easiest practical check is your yearly hours: add all worked hours from this year's daily entries and any monthly backfill summaries. If that total is around 1,225 hours or more, you usually pass the main hours test. That is roughly 102 hours a month on average, or about 24 hours a week across the year."
+            invalid={invalidSettingFields.qualifiesForSelfEmployedDeduction === true}
             label="Qualifies For Self-Employed Deduction"
             checked={draftSettings.qualifiesForSelfEmployedDeduction}
             disabled={isSaving}
@@ -848,29 +1034,37 @@ export function Configuration({
         </div>
 
         <div className="mt-4 space-y-4">
-          {sortedDraftSummaries.map((summary, index) => (
-            <div
-              key={`${summary.monthKey}-${index}`}
-              ref={(node) => {
-                monthCardRefs.current[summary.monthKey] = node
-              }}
-              className="rounded-[1.5rem] bg-muted/55 p-4"
-            >
+          {sortedDraftSummaries.map((summary, index) => {
+            const rowKey = getSummaryRowKey(summary, index)
+            const rowInvalidFields = invalidSummaryFields[rowKey] ?? {}
+            const isInvalidSummaryRow = Object.keys(rowInvalidFields).length > 0
+
+            return (
+              <div
+                key={`${summary.monthKey}-${index}`}
+                ref={(node) => {
+                  monthCardRefs.current[rowKey] = node
+                }}
+                className={`rounded-[1.5rem] p-4 ${
+                  isInvalidSummaryRow ? 'border border-rose-300 bg-rose-50/70' : 'bg-muted/55'
+                }`}
+              >
               <div className="grid gap-3 md:grid-cols-2">
                 <label className="block">
                   <span className="mb-2 block text-sm font-medium text-foreground">Month</span>
                   <input
                     ref={(node) => {
-                      monthInputRefs.current[summary.monthKey] = node
+                      monthInputRefs.current[rowKey] = node
                     }}
-                    className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
+                    className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                      rowInvalidFields.monthKey
+                        ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
+                        : 'border-border focus:border-primary'
+                    }`}
                     disabled={isSaving}
                     type="month"
                     value={summary.monthKey}
                     onChange={(event) => updateSummaryField(index, 'monthKey', event.target.value)}
-                    onFocus={selectPrefilledZero}
-                    onMouseUp={preservePrefilledZeroSelectionOnMouseUp}
-                    onTouchEnd={preservePrefilledZeroSelectionOnTouchEnd}
                   />
                 </label>
 
@@ -883,7 +1077,11 @@ export function Configuration({
                     />
                   </span>
                   <input
-                    className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
+                    className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                      rowInvalidFields.hours
+                        ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
+                        : 'border-border focus:border-primary'
+                    }`}
                     disabled={isSaving}
                     type="number"
                     min="0"
@@ -907,7 +1105,11 @@ export function Configuration({
                     />
                   </span>
                   <input
-                    className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
+                    className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                      rowInvalidFields.invoicedIncome
+                        ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
+                        : 'border-border focus:border-primary'
+                    }`}
                     disabled={isSaving}
                     type="number"
                     min="0"
@@ -979,8 +1181,9 @@ export function Configuration({
               >
                 Remove month
               </button>
-            </div>
-          ))}
+              </div>
+            )
+          })}
         </div>
         </section>
 
