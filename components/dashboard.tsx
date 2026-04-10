@@ -360,24 +360,31 @@ function SetupChecklistItem({
 }) {
   return (
     <button
-      className="flex w-full items-center justify-between gap-3 rounded-[1.25rem] bg-muted/65 px-4 py-3 text-left transition hover:bg-muted"
+      className="flex w-full items-center justify-between gap-3 rounded-[1.3rem] border border-border bg-background px-4 py-3 text-left shadow-sm transition hover:border-foreground/20 hover:bg-muted/35"
       onClick={onClick}
       type="button"
     >
-      <span>
+      <span className="min-w-0 flex-1">
         <span className="block text-sm font-medium text-foreground">{label}</span>
         <span className="mt-1 block text-xs text-muted-foreground">{subtitle}</span>
       </span>
-      <span
-        className={`rounded-full px-3 py-1 text-xs font-medium ${
-          status === 'Ready'
-            ? 'bg-emerald-100 text-emerald-700'
-            : status === 'Review recommended'
-              ? 'bg-amber-100 text-amber-800'
-              : 'bg-rose-100 text-rose-700'
-        }`}
-      >
-        {status}
+      <span className="flex items-center gap-2">
+        <span
+          className={`rounded-full px-3 py-1 text-xs font-medium ${
+            status === 'Ready'
+              ? 'bg-emerald-100 text-emerald-700'
+              : status === 'Review recommended'
+                ? 'bg-amber-100 text-amber-800'
+                : 'bg-rose-100 text-rose-700'
+          }`}
+        >
+          {status}
+        </span>
+        <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-muted text-foreground">
+          <span aria-hidden="true" className="text-lg leading-none">
+            ›
+          </span>
+        </span>
       </span>
     </button>
   )

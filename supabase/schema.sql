@@ -47,6 +47,13 @@ create table if not exists public.monthly_summaries (
   unique (user_id, month_key)
 );
 
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  display_name text,
+  created_at timestamptz not null default timezone('utc', now()),
+  updated_at timestamptz not null default timezone('utc', now())
+);
+
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
@@ -75,9 +82,17 @@ before update on public.monthly_summaries
 for each row
 execute function public.set_updated_at();
 
+drop trigger if exists profiles_set_updated_at on public.profiles;
+create trigger profiles_set_updated_at
+before update on public.profiles
+for each row
+execute function public.set_updated_at();
+
 alter table public.app_settings enable row level security;
 alter table public.daily_entries enable row level security;
 alter table public.monthly_summaries enable row level security;
+
+alter table public.profiles enable row level security;
 
 drop policy if exists "app_settings_select_own" on public.app_settings;
 drop policy if exists "app_settings_insert_own" on public.app_settings;
@@ -93,6 +108,11 @@ drop policy if exists "monthly_summaries_select_own" on public.monthly_summaries
 drop policy if exists "monthly_summaries_insert_own" on public.monthly_summaries;
 drop policy if exists "monthly_summaries_update_own" on public.monthly_summaries;
 drop policy if exists "monthly_summaries_delete_own" on public.monthly_summaries;
+
+drop policy if exists "profiles_select_own" on public.profiles;
+drop policy if exists "profiles_insert_own" on public.profiles;
+drop policy if exists "profiles_update_own" on public.profiles;
+drop policy if exists "profiles_delete_own" on public.profiles;
 
 create policy "app_settings_select_own"
 on public.app_settings
@@ -168,3 +188,28 @@ on public.monthly_summaries
 for delete
 to authenticated
 using (auth.uid() = user_id);
+
+create policy "profiles_select_own"
+on public.profiles
+for select
+to authenticated
+using (auth.uid() = id);
+
+create policy "profiles_insert_own"
+on public.profiles
+for insert
+to authenticated
+with check (auth.uid() = id);
+
+create policy "profiles_update_own"
+on public.profiles
+for update
+to authenticated
+using (auth.uid() = id)
+with check (auth.uid() = id);
+
+create policy "profiles_delete_own"
+on public.profiles
+for delete
+to authenticated
+using (auth.uid() = id);

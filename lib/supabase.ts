@@ -41,8 +41,10 @@ export async function getCurrentSession() {
     return null
   }
 
+  let timeoutId: number | undefined
+
   const timeoutPromise = new Promise<null>((resolve) => {
-    window.setTimeout(() => {
+    timeoutId = window.setTimeout(() => {
       console.warn('[Financial Goal] Supabase getSession timed out. Returning null session.')
       resolve(null)
     }, SESSION_TIMEOUT_MS)
@@ -60,6 +62,11 @@ export async function getCurrentSession() {
     .catch((error) => {
       console.error('[Financial Goal] Supabase getSession failed.', error)
       return null
+    })
+    .finally(() => {
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId)
+      }
     })
 
   return Promise.race([sessionPromise, timeoutPromise])

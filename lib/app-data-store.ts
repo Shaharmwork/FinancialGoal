@@ -116,17 +116,6 @@ function hasAnyUserData({
   return hasSettingsRow || entries.length > 0 || monthlySummaries.length > 0
 }
 
-function isNewUser({
-  hasSettingsRow,
-  entries,
-  monthlySummaries,
-}: {
-  hasSettingsRow: boolean
-  entries: DailyEntry[]
-  monthlySummaries: MonthlySummary[]
-}) {
-  return !hasSettingsRow && entries.length === 0 && monthlySummaries.length === 0
-}
 
 function mapEntryFromRow(row: DailyEntryRow): DailyEntry | null {
   return normalizeEntry({
@@ -358,11 +347,7 @@ export async function loadRemoteAppData(): Promise<LoadedRemoteAppData> {
     entries: remoteEntries,
     monthlySummaries: remoteMonthlySummaries,
     settings: mapSettingsFromRow(settingsResult.data as AppSettingsRow | null),
-    isNewUser: isNewUser({
-      hasSettingsRow,
-      entries: remoteEntries,
-      monthlySummaries: remoteMonthlySummaries,
-    }),
+    isNewUser: false,
   }
 }
 

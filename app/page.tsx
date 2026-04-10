@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { Configuration as ConfigurationScreen } from '@/components/configuration'
 import { DailyLog } from '@/components/daily-log'
@@ -18,6 +18,14 @@ import {
   updateUserOnboardingDismissals,
 } from '@/lib/onboarding-dismissals'
 import { starterStoredState } from '@/lib/default-state'
+import {
+  clearUserReportDayFormDrafts,
+  clearUserReportDraftEntries,
+  getUserCurrentScreen,
+  getUserReportDraftEntries,
+  updateUserCurrentScreen,
+  updateUserReportDraftEntries,
+} from '@/lib/ui-preferences'
 import { toMonthKey } from '@/lib/calculations'
 import {
   getCurrentSession,
@@ -41,6 +49,10 @@ const navItems: Array<{ id: Screen; label: string }> = [
 
 function cloneEntries(entries: DailyEntry[]) {
   return entries.map((entry) => ({ ...entry }))
+}
+
+function removeEntryByDate(entries: DailyEntry[], dateKey: string) {
+  return entries.filter((entry) => entry.date !== dateKey)
 }
 
 function getComparableEntries(entries: DailyEntry[]) {
@@ -119,6 +131,7 @@ export default function Home() {
   const [pendingFutureSaveEntries, setPendingFutureSaveEntries] = useState<DailyEntry[] | null>(null)
   const [pendingScreen, setPendingScreen] = useState<Screen | null>(null)
   const [toastErrorMessage, setToastErrorMessage] = useState('')
+  const [hasHydratedReportDraftEntries, setHasHydratedReportDraftEntries] = useState(false)
   const hasUnsavedReportChanges =
     reportDraftEntries !== null && !areEntriesEqual(reportDraftEntries, entries)
 
@@ -229,6 +242,9 @@ export default function Home() {
 
     if (!userId) {
       setDismissedCurrentMonthReminderMonthKey('')
+      setCurrentScreen('dashboard')
+      setReportDraftEntries(null)
+      setHasHydratedReportDraftEntries(false)
       return
     }
 
@@ -236,7 +252,31 @@ export default function Home() {
     setDismissedCurrentMonthReminderMonthKey(
       dismissals.dismissedCurrentMonthReminderMonthKey ?? '',
     )
+
+    const savedScreen = getUserCurrentScreen(userId)
+    setCurrentScreen(savedScreen ?? 'dashboard')
   }, [session])
+
+  useEffect(() => {
+    const userId = session?.user?.id
+
+    if (!userId) {
+      return
+    }
+
+    updateUserCurrentScreen(userId, currentScreen)
+  }, [currentScreen, session])
+
+  useEffect(() => {
+    const userId = session?.user?.id
+
+    if (!userId || !hasLoadedRemoteState) {
+      return
+    }
+
+    setReportDraftEntries(getUserReportDraftEntries(userId))
+    setHasHydratedReportDraftEntries(true)
+  }, [hasLoadedRemoteState, session])
 
   useEffect(() => {
     if (!hasLoadedRemoteState) {
@@ -249,7 +289,26 @@ export default function Home() {
   }, [entries, hasLoadedRemoteState])
 
   useEffect(() => {
+    const userId = session?.user?.id
+
+    if (!userId || !hasLoadedRemoteState) {
+      return
+    }
+
+    if (reportDraftEntries !== null && !areEntriesEqual(reportDraftEntries, entries)) {
+      updateUserReportDraftEntries(userId, reportDraftEntries)
+      return
+    }
+
+    clearUserReportDraftEntries(userId)
+  }, [entries, hasLoadedRemoteState, reportDraftEntries, session])
+
+  useEffect(() => {
     if (currentScreen !== 'daily-log') {
+      return
+    }
+
+    if (!hasLoadedRemoteState || !hasHydratedReportDraftEntries) {
       return
     }
 
@@ -261,7 +320,14 @@ export default function Home() {
     if (!hasUnsavedReportChanges && !areEntriesEqual(reportDraftEntries, entries)) {
       setReportDraftEntries(cloneEntries(entries))
     }
-  }, [currentScreen, entries, hasUnsavedReportChanges, reportDraftEntries])
+  }, [
+    currentScreen,
+    entries,
+    hasHydratedReportDraftEntries,
+    hasLoadedRemoteState,
+    hasUnsavedReportChanges,
+    reportDraftEntries,
+  ])
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' })
@@ -271,27 +337,42 @@ export default function Home() {
     console.log('[Financial Goal] currentScreen changed:', currentScreen)
   }, [currentScreen])
 
-  const handleUpsertEntry = (entry: DailyEntry) => {
+  const handleUpsertEntry = useCallback((entry: DailyEntry) => {
     setReportDraftEntries((previousEntries) => {
       const draftEntries = previousEntries ?? cloneEntries(entries)
 
       return [
-      entry,
-      ...draftEntries.filter((previousEntry) => previousEntry.date !== entry.date),
+        entry,
+        ...draftEntries.filter((previousEntry) => previousEntry.date !== entry.date),
       ]
     })
-  }
+  }, [entries])
 
-  const handleRemoveEntryForDate = (dateKey: string) => {
+  const handleRemoveEntryForDate = useCallback((dateKey: string) => {
     setReportDraftEntries((previousEntries) => {
       const draftEntries = previousEntries ?? cloneEntries(entries)
       return draftEntries.filter((previousEntry) => previousEntry.date !== dateKey)
     })
-  }
+  }, [entries])
+
+  const handleDeleteSavedEntryImmediately = useCallback((dateKey: string) => {
+    setEntries((previousEntries) => {
+      const nextSavedEntries = removeEntryByDate(previousEntries, dateKey)
+
+      setReportDraftEntries((previousDraftEntries) =>
+        removeEntryByDate(previousDraftEntries ?? cloneEntries(nextSavedEntries), dateKey),
+      )
+
+      return nextSavedEntries
+    })
+  }, [])
 
   const proceedToScreen = (screen: Screen) => {
-    if (screen === 'daily-log') {
+    if (screen === 'daily-log' && reportDraftEntries === null) {
       setReportDraftEntries(cloneEntries(entries))
+    }
+
+    if (screen === 'daily-log') {
       setReportResetRequest((currentValue) => currentValue + 1)
     }
 
@@ -301,6 +382,12 @@ export default function Home() {
   const commitReportEntries = (entriesToSave: DailyEntry[]) => {
     setEntries(cloneEntries(entriesToSave))
     setReportDraftEntries(cloneEntries(entriesToSave))
+    const userId = session?.user?.id
+
+    if (userId) {
+      clearUserReportDayFormDrafts(userId)
+      clearUserReportDraftEntries(userId)
+    }
   }
 
   const finishSavingReportEntries = (entriesToSave: DailyEntry[]) => {
@@ -332,6 +419,12 @@ export default function Home() {
 
   const handleDiscardReportEntries = () => {
     setReportDraftEntries(cloneEntries(entries))
+    const userId = session?.user?.id
+
+    if (userId) {
+      clearUserReportDayFormDrafts(userId)
+      clearUserReportDraftEntries(userId)
+    }
   }
 
   const handleScreenChange = (screen: Screen) => {
@@ -348,22 +441,22 @@ export default function Home() {
     proceedToScreen(screen)
   }
 
-  const handleOpenConfigurationSetup = () => {
+  const handleOpenConfigurationSetup = useCallback(() => {
     setSettingsFocusRequest((currentValue) => currentValue + 1)
     setCurrentScreen('configuration')
-  }
+  }, [])
 
-  const handleAddPreviousMonths = () => {
+  const handleAddPreviousMonths = useCallback(() => {
     setBackfillFocusRequest((currentValue) => currentValue + 1)
     setCurrentScreen('configuration')
-  }
+  }, [])
 
-  const handleFillMissingDays = () => {
+  const handleFillMissingDays = useCallback(() => {
     setFillMissingDaysRequest((currentValue) => currentValue + 1)
     setCurrentScreen('daily-log')
-  }
+  }, [])
 
-  const handleDismissCurrentMonthReminder = () => {
+  const handleDismissCurrentMonthReminder = useCallback(() => {
     const userId = session?.user?.id
 
     if (!userId) {
@@ -375,20 +468,26 @@ export default function Home() {
     updateUserOnboardingDismissals(userId, {
       dismissedCurrentMonthReminderMonthKey: currentMonthKey,
     })
-  }
+  }, [session])
 
-  const handleSaveConfiguration = async (
+  const handleSaveConfiguration = useCallback(async (
     nextSettings: Settings,
     nextMonthlySummaries: MonthlySummary[],
   ) => {
-    await Promise.all([
-      saveSettingsToSupabase(nextSettings),
-      saveMonthlySummariesToSupabase(nextMonthlySummaries),
-    ])
+    try {
+      await Promise.all([
+        saveSettingsToSupabase(nextSettings),
+        saveMonthlySummariesToSupabase(nextMonthlySummaries),
+      ])
 
-    setSettings(nextSettings)
-    setMonthlySummaries(nextMonthlySummaries)
-  }
+      setSettings(nextSettings)
+      setMonthlySummaries(nextMonthlySummaries)
+    } catch (error) {
+      console.error('[Financial Goal] Failed to save configuration.', error)
+      setToastErrorMessage(getErrorMessage(error, 'Failed to save configuration.'))
+      throw error
+    }
+  }, [])
   const handleSignIn = async (email: string, password: string) => {
     if (!hasSupabaseConfig()) {
       setToastErrorMessage(
@@ -430,41 +529,42 @@ export default function Home() {
     }
   }
 
-  const activeScreen = useMemo(() => {
-    if (currentScreen === 'dashboard') {
-      return (
-        <Dashboard
-          displayName={displayName}
-          entries={entries}
-          isCurrentMonthReminderDismissed={
-            dismissedCurrentMonthReminderMonthKey === toMonthKey(new Date())
-          }
-          monthlySummaries={monthlySummaries}
-          onOpenConfigurationSetup={handleOpenConfigurationSetup}
-          onAddPreviousMonths={handleAddPreviousMonths}
-          onDismissCurrentMonthReminder={handleDismissCurrentMonthReminder}
-          onFillMissingDays={handleFillMissingDays}
-          settings={settings}
-        />
-      )
-    }
+  let activeScreen: React.ReactNode
 
-    if (currentScreen === 'daily-log') {
-      return (
-        <DailyLog
-          entries={reportDraftEntries ?? entries}
-          fillMissingDaysRequest={fillMissingDaysRequest}
-          hasUnsavedChanges={hasUnsavedReportChanges}
-          onRemoveEntryForDate={handleRemoveEntryForDate}
-          onSaveEntries={handleSaveReportEntries}
-          reportResetRequest={reportResetRequest}
-          settings={settings}
-          onUpsertEntry={handleUpsertEntry}
-        />
-      )
-    }
-
-    return (
+  if (currentScreen === 'dashboard') {
+    activeScreen = (
+      <Dashboard
+        displayName={displayName}
+        entries={entries}
+        isCurrentMonthReminderDismissed={
+          dismissedCurrentMonthReminderMonthKey === toMonthKey(new Date())
+        }
+        monthlySummaries={monthlySummaries}
+        onOpenConfigurationSetup={handleOpenConfigurationSetup}
+        onAddPreviousMonths={handleAddPreviousMonths}
+        onDismissCurrentMonthReminder={handleDismissCurrentMonthReminder}
+        onFillMissingDays={handleFillMissingDays}
+        settings={settings}
+      />
+    )
+  } else if (currentScreen === 'daily-log') {
+    activeScreen = (
+      <DailyLog
+        entries={reportDraftEntries ?? entries}
+        fillMissingDaysRequest={fillMissingDaysRequest}
+        hasUnsavedChanges={hasUnsavedReportChanges}
+        onDeleteSavedEntryImmediately={handleDeleteSavedEntryImmediately}
+        onRemoveEntryForDate={handleRemoveEntryForDate}
+        onSaveEntries={handleSaveReportEntries}
+        reportResetRequest={reportResetRequest}
+        savedEntries={entries}
+        settings={settings}
+        onUpsertEntry={handleUpsertEntry}
+        userId={session?.user?.id}
+      />
+    )
+  } else {
+    activeScreen = (
       <ConfigurationScreen
         backfillFocusRequest={backfillFocusRequest}
         entries={entries}
@@ -474,22 +574,7 @@ export default function Home() {
         settings={settings}
       />
     )
-  }, [
-    currentScreen,
-    entries,
-    handleRemoveEntryForDate,
-    handleUpsertEntry,
-    handleOpenConfigurationSetup,
-    handleAddPreviousMonths,
-    handleDismissCurrentMonthReminder,
-    handleFillMissingDays,
-    dismissedCurrentMonthReminderMonthKey,
-    displayName,
-    handleSaveConfiguration,
-    monthlySummaries,
-    reportDraftEntries,
-    settings,
-  ])
+  }
 
   const isConfigured = hasSupabaseConfig()
 
@@ -539,7 +624,52 @@ export default function Home() {
     <div className="relative isolate min-h-screen overflow-x-hidden bg-background text-foreground">
       <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-72 bg-[radial-gradient(circle_at_top_left,rgba(255,216,107,0.35),transparent_36%),radial-gradient(circle_at_top_right,rgba(136,201,255,0.28),transparent_32%),radial-gradient(circle_at_30%_75%,rgba(201,188,255,0.22),transparent_26%)]" />
 
-      <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-[30rem] flex-col px-4 pb-[calc(12rem+env(safe-area-inset-bottom))] pt-4 sm:px-5">
+      <nav className="fixed inset-x-0 top-0 z-[160] px-4 pt-[calc(env(safe-area-inset-top)+0.75rem)]">
+        <div className="mx-auto flex max-w-[30rem] items-center justify-between gap-3">
+          <div className="grid grid-cols-3 gap-2 rounded-[1.6rem] border border-border bg-card/95 p-1.5 shadow-[0_18px_36px_rgba(24,32,48,0.14)] backdrop-blur">
+            {navItems.map((item) => {
+              const isActive = currentScreen === item.id
+
+              return (
+                <button
+                  key={item.id}
+                  aria-current={isActive ? 'page' : undefined}
+                  aria-label={item.label}
+                  className={`inline-flex h-11 w-11 items-center justify-center rounded-[1.1rem] transition ${
+                    isActive
+                      ? 'bg-[linear-gradient(135deg,rgba(255,216,107,0.95),rgba(255,143,122,0.85))] text-foreground shadow-sm'
+                      : 'bg-transparent text-muted-foreground hover:bg-muted/70'
+                  }`}
+                  onClick={() => handleScreenChange(item.id)}
+                  type="button"
+                >
+                  <span aria-hidden="true">
+                    {item.id === 'dashboard' ? (
+                      <HomeIcon />
+                    ) : item.id === 'daily-log' ? (
+                      <ClockIcon />
+                    ) : (
+                      <CogIcon />
+                    )}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <button
+            aria-label={isSigningOut ? 'Signing out' : 'Sign out'}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-border bg-card/95 text-foreground shadow-[0_18px_36px_rgba(24,32,48,0.14)] backdrop-blur transition hover:bg-muted/70 disabled:opacity-60"
+            disabled={isSigningOut}
+            onClick={() => void handleSignOut()}
+            type="button"
+          >
+            <SignOutIcon />
+          </button>
+        </div>
+      </nav>
+
+      <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-[30rem] flex-col px-4 pb-[calc(3rem+env(safe-area-inset-bottom))] pt-[calc(env(safe-area-inset-top)+5.75rem)] sm:px-5">
         <section key={currentScreen} data-screen={currentScreen} className="w-full">
           {!hasLoadedRemoteState ? (
             <div className="rounded-[1.9rem] border border-border bg-card p-5 shadow-sm">
@@ -550,57 +680,6 @@ export default function Home() {
           )}
         </section>
       </main>
-
-      <nav className="fixed inset-x-0 bottom-0 z-[140] px-4 pb-[calc(env(safe-area-inset-bottom)+0.9rem)] pt-3">
-        <div className="mx-auto max-w-[30rem]">
-          <div className="grid grid-cols-3 gap-2 rounded-[2rem] border border-border bg-card p-2 shadow-[0_18px_36px_rgba(24,32,48,0.14)]">
-            {navItems.map((item) => {
-              const isActive = currentScreen === item.id
-
-              return (
-                <button
-                  key={item.id}
-                  aria-current={isActive ? 'page' : undefined}
-                  className={`min-h-[4.5rem] w-full touch-manipulation select-none rounded-[1.45rem] px-3 py-3 text-sm font-medium transition ${
-                    isActive
-                      ? 'bg-[linear-gradient(135deg,rgba(255,216,107,0.95),rgba(255,143,122,0.85))] text-foreground shadow-sm'
-                      : 'text-muted-foreground'
-                  }`}
-                  onClick={() => handleScreenChange(item.id)}
-                  type="button"
-                >
-                  <span className="flex flex-col items-center justify-center gap-1">
-                    <span aria-hidden="true">
-                      {item.id === 'dashboard' ? (
-                        <HomeIcon />
-                      ) : item.id === 'daily-log' ? (
-                        <ClockIcon />
-                      ) : (
-                        <CogIcon />
-                      )}
-                    </span>
-                    <span className="block text-[13px]">{item.label}</span>
-                  </span>
-                  <span
-                    className={`mx-auto mt-1 block h-1.5 w-1.5 rounded-full ${
-                      isActive ? 'bg-foreground/75' : 'bg-transparent'
-                    }`}
-                  />
-                </button>
-              )
-            })}
-          </div>
-
-          <button
-            className="mt-2 w-full rounded-[1.4rem] border border-border bg-card px-4 py-3 text-sm font-medium text-foreground shadow-[0_18px_36px_rgba(24,32,48,0.14)] disabled:opacity-60"
-            disabled={isSigningOut}
-            onClick={() => void handleSignOut()}
-            type="button"
-          >
-            {isSigningOut ? 'Signing out...' : 'Sign out'}
-          </button>
-        </div>
-      </nav>
 
       <ErrorToast message={toastErrorMessage} onDismiss={() => setToastErrorMessage('')} />
       <WarningModal
@@ -711,7 +790,7 @@ function ErrorToast({
   }
 
   return (
-    <div className="pointer-events-none fixed inset-x-0 top-4 z-[200] px-4">
+    <div className="pointer-events-none fixed inset-x-0 top-[calc(env(safe-area-inset-top)+4.75rem)] z-[200] px-4">
       <div className="pointer-events-auto mx-auto flex w-full max-w-[30rem] items-start gap-3 rounded-[1.3rem] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900 shadow-[0_18px_36px_rgba(24,32,48,0.14)]">
         <div className="mt-0.5 shrink-0">
           <ToastWarningIcon />
@@ -844,6 +923,27 @@ function CogIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
         strokeWidth="1.2"
+      />
+    </svg>
+  )
+}
+
+function SignOutIcon() {
+  return (
+    <svg className="h-[1rem] w-[1rem]" fill="none" viewBox="0 0 24 24">
+      <path
+        d="M10 5.75H7.75A1.75 1.75 0 0 0 6 7.5v9a1.75 1.75 0 0 0 1.75 1.75H10"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.8"
+      />
+      <path
+        d="M13 8.5 17.5 12 13 15.5M17.25 12H10"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.8"
       />
     </svg>
   )

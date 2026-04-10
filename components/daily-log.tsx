@@ -1,6 +1,12 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { WarningModal } from '@/components/warning-modal'
+import {
+  clearUserReportDayFormDrafts,
+  getUserReportDayFormDrafts,
+  updateUserReportDayFormDrafts,
+} from '@/lib/ui-preferences'
 import type { DailyEntry, Settings } from '@/lib/types'
 import {
   getCurrentMonthRange,
@@ -16,11 +22,14 @@ interface DailyLogProps {
   entries: DailyEntry[]
   fillMissingDaysRequest?: number
   hasUnsavedChanges?: boolean
+  onDeleteSavedEntryImmediately: (dateKey: string) => void
   onRemoveEntryForDate: (dateKey: string) => void
-  onSaveEntries: (nextEntries?: DailyEntry[]) => void
+  onSaveEntries: (nextEntries?: DailyEntry[]) => boolean | void
   onUpsertEntry: (entry: DailyEntry) => void
   reportResetRequest?: number
+  savedEntries: DailyEntry[]
   settings: Settings
+  userId?: string
 }
 
 interface CalendarDay {
@@ -29,6 +38,59 @@ interface CalendarDay {
   isWeekend: boolean
   key: string
 }
+
+type InvalidDailyFieldsState = {
+  hours?: boolean
+  invoicedIncome?: boolean
+}
+
+interface DailySoftWarning {
+  body: string
+  title: string
+}
+
+interface DailyValidationIssue {
+  body: string
+  title: string
+}
+
+interface DayInputDraft {
+  expenses: string
+  hours: string
+  invoicedIncome: string
+  paidIncome: string
+}
+
+type InvalidDailyFieldsByDate = Record<string, InvalidDailyFieldsState>
+type DailyDraftSaveState =
+  | {
+      kind: 'expense_only'
+      values: {
+        expenses: number
+        hours: number
+        invoicedIncome: number
+        paidIncome: number
+      }
+    }
+  | {
+      invalidFields: InvalidDailyFieldsState
+      kind: 'invalid'
+      values: {
+        expenses: number
+        hours: number
+        invoicedIncome: number
+        paidIncome: number
+      }
+    }
+  | {
+      kind: 'worked'
+      values: {
+        expenses: number
+        hours: number
+        invoicedIncome: number
+        paidIncome: number
+      }
+    }
 
 function parseNumber(value: string) {
   const parsed = Number(value)
@@ -129,15 +191,116 @@ function getDefaultDateForMonth(monthKey: string, today: Date) {
   return monthKey === toMonthKey(today) ? toDateKey(today) : toDateKey(parseMonthKey(monthKey))
 }
 
+function getEntryDraft(entry: DailyEntry | undefined): DayInputDraft {
+  if (!entry || entry.dayStatus === 'no_work') {
+    return {
+      expenses: '',
+      hours: '',
+      invoicedIncome: '',
+      paidIncome: '',
+    }
+  }
+
+  return {
+    expenses: entry.expenses > 0 ? entry.expenses.toString() : '',
+    hours: entry.hours > 0 ? entry.hours.toString() : '',
+    invoicedIncome: entry.invoicedIncome > 0 ? entry.invoicedIncome.toString() : '',
+    paidIncome: entry.paidIncome > 0 ? entry.paidIncome.toString() : '',
+  }
+}
+
+function isDraftEmpty(draft: DayInputDraft) {
+  return (
+    draft.hours.trim() === '' &&
+    draft.invoicedIncome.trim() === '' &&
+    draft.paidIncome.trim() === '' &&
+    draft.expenses.trim() === ''
+  )
+}
+
+function getResolvedDraftInvoiceAmount(draft: DayInputDraft, settings: Settings) {
+  if (draft.invoicedIncome.trim() !== '') {
+    return parseNumber(draft.invoicedIncome)
+  }
+
+  const resolvedHours = parseNumber(draft.hours)
+  const defaultShiftHours = settings.defaultShiftHours ?? 0
+  const defaultShiftIncome = settings.defaultShiftIncome ?? 0
+
+  if (resolvedHours > 0 && defaultShiftHours > 0 && defaultShiftIncome > 0) {
+    return getCalculatedDefaultInvoiceAmount(draft.hours, settings)
+  }
+
+  return 0
+}
+
+function getDailyDraftSaveState(draft: DayInputDraft, settings: Settings): DailyDraftSaveState {
+  const values = {
+    expenses: parseNumber(draft.expenses),
+    hours: parseNumber(draft.hours),
+    invoicedIncome: getResolvedDraftInvoiceAmount(draft, settings),
+    paidIncome: parseNumber(draft.paidIncome),
+  }
+
+  const hasAnyValue =
+    values.hours > 0 ||
+    values.invoicedIncome > 0 ||
+    values.paidIncome > 0 ||
+    values.expenses > 0
+
+  if (!hasAnyValue) {
+    return {
+      kind: 'invalid',
+      invalidFields: {
+        hours: true,
+        invoicedIncome: true,
+      },
+      values,
+    }
+  }
+
+  const isExpenseOnlyDay =
+    values.expenses > 0 &&
+    values.hours <= 0 &&
+    values.invoicedIncome <= 0 &&
+    values.paidIncome <= 0
+
+  if (isExpenseOnlyDay) {
+    return {
+      kind: 'expense_only',
+      values,
+    }
+  }
+
+  if (values.hours > 0 && values.invoicedIncome > 0) {
+    return {
+      kind: 'worked',
+      values,
+    }
+  }
+
+  return {
+    kind: 'invalid',
+    invalidFields: {
+      hours: values.hours <= 0,
+      invoicedIncome: values.invoicedIncome <= 0,
+    },
+    values,
+  }
+}
+
 export function DailyLog({
   entries,
   fillMissingDaysRequest = 0,
   hasUnsavedChanges = false,
+  onDeleteSavedEntryImmediately,
   onRemoveEntryForDate,
   onSaveEntries,
   onUpsertEntry,
   reportResetRequest = 0,
+  savedEntries,
   settings,
+  userId,
 }: DailyLogProps) {
   const today = new Date()
   const todayDateKey = toDateKey(today)
@@ -151,7 +314,12 @@ export function DailyLog({
   const [invoicedIncome, setInvoicedIncome] = useState('')
   const [paidIncome, setPaidIncome] = useState('')
   const [expenses, setExpenses] = useState('')
+  const [dayInputDrafts, setDayInputDrafts] = useState<Record<string, DayInputDraft>>({})
   const [formMessage, setFormMessage] = useState('')
+  const [invalidFieldsByDate, setInvalidFieldsByDate] = useState<InvalidDailyFieldsByDate>({})
+  const [validationIssue, setValidationIssue] = useState<DailyValidationIssue | null>(null)
+  const [softWarning, setSoftWarning] = useState<DailySoftWarning | null>(null)
+  const [pendingDeleteEntry, setPendingDeleteEntry] = useState<DailyEntry | null>(null)
   const formRef = useRef<HTMLElement | null>(null)
   const hoursInputRef = useRef<HTMLInputElement | null>(null)
   const visibleMonthDate = parseMonthKey(visibleMonthKey)
@@ -172,6 +340,10 @@ export function DailyLog({
   const noWorkDateKeys = useMemo(
     () => new Set(entries.filter((entry) => entry.dayStatus === 'no_work').map((entry) => entry.date)),
     [entries],
+  )
+  const savedEntryDateKeys = useMemo(
+    () => new Set(savedEntries.map((entry) => entry.date)),
+    [savedEntries],
   )
   const calculatedDefaultInvoiceAmount = getCalculatedDefaultInvoiceAmount(hours, settings)
   const hasConfiguredInvoiceDefaults =
@@ -194,25 +366,17 @@ export function DailyLog({
     () => entries.find((entry) => entry.date === date),
     [date, entries],
   )
+  const selectedDraft = dayInputDrafts[date]
   const isSelectedDayMarkedNoWork = selectedEntry?.dayStatus === 'no_work'
-  const selectedWorkedHours =
-    selectedEntry && selectedEntry.dayStatus !== 'no_work' && selectedEntry.hours > 0
-      ? selectedEntry.hours.toString()
-      : ''
-  const selectedWorkedInvoicedIncome =
-    selectedEntry && selectedEntry.dayStatus !== 'no_work' && selectedEntry.invoicedIncome > 0
-      ? selectedEntry.invoicedIncome.toString()
-      : ''
-  const selectedWorkedPaidIncome =
-    selectedEntry && selectedEntry.dayStatus !== 'no_work' && selectedEntry.paidIncome > 0
-      ? selectedEntry.paidIncome.toString()
-      : ''
-  const selectedWorkedExpenses =
-    selectedEntry && selectedEntry.dayStatus !== 'no_work' && selectedEntry.expenses > 0
-      ? selectedEntry.expenses.toString()
-      : ''
+  const selectedEntryDraft = getEntryDraft(selectedEntry)
+  const selectedWorkedHours = selectedEntryDraft.hours
+  const selectedWorkedInvoicedIncome = selectedEntryDraft.invoicedIncome
+  const selectedWorkedPaidIncome = selectedEntryDraft.paidIncome
+  const selectedWorkedExpenses = selectedEntryDraft.expenses
+  const currentInvalidFields = invalidFieldsByDate[date] ?? {}
   const hasPendingSelectedDayChanges =
     !isSelectedDayMarkedNoWork &&
+    !!selectedDraft &&
     (hours !== selectedWorkedHours ||
       invoicedIncome !== selectedWorkedInvoicedIncome ||
       paidIncome !== selectedWorkedPaidIncome ||
@@ -221,6 +385,28 @@ export function DailyLog({
   const resetToCurrentDayAndWeek = () => {
     syncSelectedDate(todayDateKey, true)
   }
+
+  useEffect(() => {
+    if (!userId) {
+      setDayInputDrafts({})
+      return
+    }
+
+    setDayInputDrafts(getUserReportDayFormDrafts(userId))
+  }, [userId])
+
+  useEffect(() => {
+    if (!userId) {
+      return
+    }
+
+    if (Object.keys(dayInputDrafts).length === 0) {
+      clearUserReportDayFormDrafts(userId)
+      return
+    }
+
+    updateUserReportDayFormDrafts(userId, dayInputDrafts)
+  }, [dayInputDrafts, userId])
 
   useEffect(() => {
     if (reportResetRequest <= 0) {
@@ -254,29 +440,13 @@ export function DailyLog({
   }, [entries, fillMissingDaysRequest, todayDateKey])
 
   useEffect(() => {
-    if (!selectedEntry) {
-      setHours('')
-      setInvoicedIncome('')
-      setPaidIncome('')
-      setExpenses('')
-      return
-    }
+    const nextDraft = selectedDraft ?? getEntryDraft(selectedEntry)
 
-    if (selectedEntry.dayStatus === 'no_work') {
-      setHours('')
-      setInvoicedIncome('')
-      setPaidIncome('')
-      setExpenses('')
-      return
-    }
-
-    setHours(selectedEntry.hours > 0 ? selectedEntry.hours.toString() : '')
-    setInvoicedIncome(
-      selectedEntry.invoicedIncome > 0 ? selectedEntry.invoicedIncome.toString() : '',
-    )
-    setPaidIncome(selectedEntry.paidIncome > 0 ? selectedEntry.paidIncome.toString() : '')
-    setExpenses(selectedEntry.expenses > 0 ? selectedEntry.expenses.toString() : '')
-  }, [selectedEntry])
+    setHours(nextDraft.hours)
+    setInvoicedIncome(nextDraft.invoicedIncome)
+    setPaidIncome(nextDraft.paidIncome)
+    setExpenses(nextDraft.expenses)
+  }, [date, selectedDraft, selectedEntry])
 
   const handleWeekChange = (delta: number) => {
     const selectedDate = parseDateKey(date)
@@ -294,55 +464,155 @@ export function DailyLog({
     syncSelectedDate(getDefaultDateForMonth(nextMonthKey, today))
   }
 
-  const buildSelectedWorkedEntry = () => {
-    const resolvedHours = parseNumber(hours)
-    const resolvedInvoicedIncome =
-      invoicedIncome.trim() === ''
-        ? getCalculatedDefaultInvoiceAmount(hours, settings)
-        : parseNumber(invoicedIncome)
-    const resolvedPaidIncome = parseNumber(paidIncome)
-    const resolvedExpenses = parseNumber(expenses)
+  const updateDraftField = (
+    field: keyof DayInputDraft,
+    value: string,
+    invalidField?: keyof InvalidDailyFieldsState,
+  ) => {
+    setDayInputDrafts((currentValue) => {
+      const existingDraft = currentValue[date] ?? getEntryDraft(selectedEntry)
+      const nextDraft = {
+        ...existingDraft,
+        [field]: value,
+      }
 
-    if (!date || resolvedHours <= 0) {
-      setFormMessage('Enter a date and billed hours first.')
-      return null
+      if (isDraftEmpty(nextDraft) && !selectedEntry) {
+        const nextValue = { ...currentValue }
+        delete nextValue[date]
+        return nextValue
+      }
+
+      return {
+        ...currentValue,
+        [date]: nextDraft,
+      }
+    })
+
+    if (!invalidField || !currentInvalidFields[invalidField]) {
+      return
     }
 
-    if (resolvedInvoicedIncome <= 0) {
-      setFormMessage('Enter an invoice amount before saving.')
-      return null
+    setInvalidFieldsByDate((currentValue) => ({
+      ...currentValue,
+      [date]: {
+        ...currentValue[date],
+        [invalidField]: false,
+      },
+    }))
+  }
+
+  function getDailyValidationIssue(nextInvalidFieldsByDate: InvalidDailyFieldsByDate): DailyValidationIssue {
+    const invalidDates = Object.entries(nextInvalidFieldsByDate)
+
+    if (invalidDates.length === 1) {
+      const [invalidDateKey, invalidFields] = invalidDates[0]
+      const missingFields = [
+        invalidFields.hours ? 'billed hours' : null,
+        invalidFields.invoicedIncome ? 'invoice amount' : null,
+      ].filter((field): field is string => field !== null)
+
+      return {
+        title: missingFields.length === 1 ? 'Complete required field' : 'Complete required fields',
+        body: `For ${formatDate(parseDateKey(invalidDateKey))}, add ${missingFields.join(' and ')} before saving this worked day. Expense-only days are allowed, but worked days still need both billed hours and invoice amount.`,
+      }
     }
+
+    const invalidSummary = invalidDates
+      .map(([invalidDateKey, invalidFields]) => {
+        const missingFields = [
+          invalidFields.hours ? 'billed hours' : null,
+          invalidFields.invoicedIncome ? 'invoice amount' : null,
+        ].filter((field): field is string => field !== null)
+
+        return `${formatDate(parseDateKey(invalidDateKey))}: ${missingFields.join(' and ')}`
+      })
+      .join('\n')
 
     return {
-      id: selectedEntry?.id ?? `entry-${date}-${Date.now()}`,
-      date,
-      dayStatus: 'worked' as const,
-      hours: resolvedHours,
-      invoicedIncome: Number(resolvedInvoicedIncome.toFixed(2)),
-      paidIncome: Number(resolvedPaidIncome.toFixed(2)),
-      expenses: Number(resolvedExpenses.toFixed(2)),
+      title: 'Complete required fields',
+      body: `Some worked days are still missing required fields. Expense-only days are allowed, but worked days still need both billed hours and invoice amount.\n\n${invalidSummary}`,
     }
   }
 
   const handleSaveAllEntries = (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault()
     let nextEntriesToSave = entries
+    const nextInvalidFieldsByDate: InvalidDailyFieldsByDate = {}
+    const softWarnings: DailySoftWarning[] = []
 
-    if (hasPendingSelectedDayChanges) {
-      const nextEntry = buildSelectedWorkedEntry()
+    Object.entries(dayInputDrafts).forEach(([draftDateKey, draft]) => {
+      const draftSaveState = getDailyDraftSaveState(draft, settings)
 
-      if (!nextEntry) {
+      if (draftSaveState.kind === 'invalid') {
+        nextInvalidFieldsByDate[draftDateKey] = draftSaveState.invalidFields
         return
+      }
+
+      const {
+        expenses: resolvedExpenses,
+        hours: resolvedHours,
+        invoicedIncome: resolvedInvoicedIncome,
+        paidIncome: resolvedPaidIncome,
+      } = draftSaveState.values
+
+      if (draftSaveState.kind === 'expense_only') {
+        softWarnings.push({
+          title: 'Expense-only day saved',
+          body: formatDate(parseDateKey(draftDateKey)),
+        })
+      }
+
+      const existingEntry = entries.find((entry) => entry.date === draftDateKey)
+      if (existingEntry?.dayStatus === 'no_work' && isDraftEmpty(draft)) {
+        return
+      }
+      const nextEntry: DailyEntry = {
+        id: existingEntry?.id ?? `entry-${draftDateKey}-${Date.now()}`,
+        date: draftDateKey,
+        dayStatus: 'worked',
+        hours: resolvedHours,
+        invoicedIncome: Number(resolvedInvoicedIncome.toFixed(2)),
+        paidIncome: Number(resolvedPaidIncome.toFixed(2)),
+        expenses: Number(resolvedExpenses.toFixed(2)),
       }
 
       nextEntriesToSave = [
         nextEntry,
-        ...entries.filter((existingEntry) => existingEntry.date !== nextEntry.date),
+        ...nextEntriesToSave.filter((existingItem) => existingItem.date !== draftDateKey),
       ]
+    })
+
+    if (Object.keys(nextInvalidFieldsByDate).length > 0) {
+      setInvalidFieldsByDate(nextInvalidFieldsByDate)
+      setValidationIssue(getDailyValidationIssue(nextInvalidFieldsByDate))
+      setFormMessage('Complete the highlighted required fields before saving.')
+      const [firstInvalidDateKey] = Object.keys(nextInvalidFieldsByDate)
+      syncSelectedDate(firstInvalidDateKey, true)
+      return
     }
 
-    onSaveEntries(nextEntriesToSave)
-    setFormMessage('Saved daily reports.')
+    setInvalidFieldsByDate({})
+
+    const didSaveContinue = onSaveEntries(nextEntriesToSave)
+
+    if (didSaveContinue !== false) {
+      setDayInputDrafts({})
+      if (softWarnings.length > 0) {
+        const warningDates = softWarnings.map((warning) => warning.body)
+        const combinedBody =
+          warningDates.length === 1
+            ? `${warningDates[0]} was saved with expenses only. Add hours or income later if this should count as a worked day.`
+            : `These dates were saved with expenses only:\n\n${warningDates.join('\n')}\n\nAdd hours or income later if any of them should count as worked days.`
+
+        setSoftWarning({
+          title: warningDates.length === 1 ? 'Expense-only day saved' : 'Expense-only days saved',
+          body: combinedBody,
+        })
+        setFormMessage('Saved daily reports with a small warning.')
+      } else {
+        setFormMessage('Saved daily reports.')
+      }
+    }
   }
 
   const handleMarkNoWork = () => {
@@ -359,6 +629,16 @@ export function DailyLog({
     setInvoicedIncome('')
     setPaidIncome('')
     setExpenses('')
+    setDayInputDrafts((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[date]
+      return nextValue
+    })
+    setInvalidFieldsByDate((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[date]
+      return nextValue
+    })
     setFormMessage('Marked as no work. Save daily reports to keep all changes.')
   }
 
@@ -368,12 +648,98 @@ export function DailyLog({
     setInvoicedIncome('')
     setPaidIncome('')
     setExpenses('')
+    setDayInputDrafts((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[date]
+      return nextValue
+    })
+    setInvalidFieldsByDate((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[date]
+      return nextValue
+    })
     setFormMessage('No work mark removed. Save daily reports to keep all changes.')
   }
 
+  const handleRequestDeleteEntry = (entry: DailyEntry) => {
+    setPendingDeleteEntry(entry)
+  }
+
+  const handleConfirmDeleteEntry = () => {
+    if (!pendingDeleteEntry) {
+      return
+    }
+
+    const deletedDateKey = pendingDeleteEntry.date
+    const isSavedEntry = savedEntryDateKeys.has(deletedDateKey)
+
+    syncSelectedDate(deletedDateKey)
+    if (isSavedEntry) {
+      onDeleteSavedEntryImmediately(deletedDateKey)
+    } else {
+      onRemoveEntryForDate(deletedDateKey)
+    }
+    setHours('')
+    setInvoicedIncome('')
+    setPaidIncome('')
+    setExpenses('')
+    setDayInputDrafts((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[deletedDateKey]
+      return nextValue
+    })
+    setInvalidFieldsByDate((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[deletedDateKey]
+      return nextValue
+    })
+    setFormMessage(
+      isSavedEntry
+        ? 'Entry deleted.'
+        : hasUnsavedChanges
+          ? 'Entry removed from the current draft. Save daily reports to keep all changes.'
+          : 'Entry removed from the current draft.',
+    )
+    setPendingDeleteEntry(null)
+  }
+
   return (
-    <div className="space-y-4 pb-8">
-      <section ref={formRef} className="rounded-[1.9rem] border border-border bg-card p-5 shadow-sm">
+    <>
+      <WarningModal
+        body={validationIssue?.body ?? ''}
+        isOpen={validationIssue !== null}
+        onClose={() => setValidationIssue(null)}
+        primaryActionLabel="Close"
+        title={validationIssue?.title ?? ''}
+      />
+      <WarningModal
+        body={softWarning?.body ?? ''}
+        isOpen={softWarning !== null}
+        onClose={() => setSoftWarning(null)}
+        primaryActionLabel="Close"
+        title={softWarning?.title ?? ''}
+      />
+      <WarningModal
+        body={
+          pendingDeleteEntry && savedEntryDateKeys.has(pendingDeleteEntry.date)
+            ? 'This will delete that saved daily entry right away. Any other unsaved report changes will stay in your current draft.'
+            : 'This removes the current day entry from your report draft. Save daily reports afterward if you want to keep the deletion.'
+        }
+        isOpen={pendingDeleteEntry !== null}
+        onClose={() => setPendingDeleteEntry(null)}
+        onPrimaryAction={handleConfirmDeleteEntry}
+        onSecondaryAction={() => setPendingDeleteEntry(null)}
+        primaryActionLabel={
+          pendingDeleteEntry && savedEntryDateKeys.has(pendingDeleteEntry.date)
+            ? 'Delete entry now'
+            : 'Delete entry'
+        }
+        secondaryActionLabel="Cancel"
+        title="Delete daily entry?"
+      />
+
+      <div className="space-y-4 pb-8">
+        <section ref={formRef} className="rounded-[1.9rem] border border-border bg-card p-5 shadow-sm">
         <h2 className="text-lg font-semibold text-foreground">Log work entry</h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Update each day you want here, then save all daily reports when you are ready.
@@ -401,103 +767,8 @@ export function DailyLog({
           </div>
 
           <div className="rounded-[1.55rem] bg-muted/75 p-3">
-            <div className="flex items-center justify-between gap-3">
-              <button
-                aria-label="Show previous week"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-background text-foreground transition hover:bg-card"
-                onClick={() => handleWeekChange(-1)}
-                type="button"
-              >
-                ‹
-              </button>
-              <div className="text-center">
-                <div className="text-sm font-semibold text-foreground">{getMonthLabel(visibleMonthDate)}</div>
-              </div>
-              <button
-                aria-label="Show next week"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-background text-foreground transition hover:bg-card disabled:opacity-35"
-                disabled={visibleWeekStartKey >= currentWeekStartKey}
-                onClick={() => handleWeekChange(1)}
-                type="button"
-              >
-                ›
-              </button>
-            </div>
-
-            <div className="mt-4 grid grid-cols-7 gap-2">
-              {visibleWeekDays.map((day) => {
-                const isSelected = day.key === date
-                const isToday = day.key === todayDateKey
-                const isFilled = filledDateKeys.has(day.key)
-                const isNoWork = noWorkDateKeys.has(day.key)
-                const isMissing =
-                  day.key.slice(0, 7) === currentMonthKey &&
-                  !day.isWeekend &&
-                  day.key < todayDateKey &&
-                  !isFilled
-
-                return (
-                  <button
-                    key={day.key}
-                    className={`relative min-h-[4.4rem] rounded-[1rem] border px-1 py-2 text-center transition ${
-                      isSelected
-                        ? 'border-primary bg-primary text-primary-foreground'
-                        : day.isWeekend
-                          ? 'border-transparent bg-slate-100 text-slate-500'
-                          : isNoWork
-                            ? 'border-sky-200 bg-sky-50 text-sky-700'
-                          : isFilled
-                            ? 'border-emerald-200 bg-emerald-100 text-emerald-900'
-                            : isMissing
-                              ? 'border-rose-200 bg-rose-50 text-rose-700'
-                              : 'border-border bg-background text-foreground'
-                    } ${isToday && !isSelected ? 'ring-2 ring-sky-300 ring-offset-1 ring-offset-muted/75' : ''}`}
-                    onClick={() => syncSelectedDate(day.key)}
-                    type="button"
-                  >
-                    <span className="block text-[11px] font-semibold uppercase tracking-[0.12em] opacity-75">
-                      {getCompactDayLabel(day.date)}
-                    </span>
-                    <span className="mt-2 block text-lg font-semibold">{day.date.getDate()}</span>
-                    {isFilled && !isSelected ? (
-                      <span
-                        className={`absolute bottom-2 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full ${
-                          isNoWork ? 'bg-sky-500' : 'bg-emerald-600'
-                        }`}
-                      />
-                    ) : null}
-                    {isMissing && !isSelected ? (
-                      <span className="absolute bottom-2 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-rose-500" />
-                    ) : null}
-                  </button>
-                )
-              })}
-            </div>
-
-            <div className="mt-4 flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-foreground">
-                Selected: {formatDate(parseDateKey(date))}
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  className="rounded-full bg-background px-3 py-2 text-sm font-medium text-foreground transition hover:bg-card"
-                  onClick={resetToCurrentDayAndWeek}
-                  type="button"
-                >
-                  Today
-                </button>
-                <button
-                  className="rounded-full bg-background px-3 py-2 text-sm font-medium text-foreground transition hover:bg-card"
-                  onClick={() => setIsMonthExpanded((currentValue) => !currentValue)}
-                  type="button"
-                >
-                  {isMonthExpanded ? 'Hide month' : 'Show month'}
-                </button>
-              </div>
-            </div>
-
             {isMonthExpanded ? (
-              <div className="mt-4 rounded-[1.3rem] bg-background/80 p-3">
+              <div className="rounded-[1.3rem] bg-background/80 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <button
                     aria-label="Show previous month"
@@ -550,11 +821,11 @@ export function DailyLog({
                                     ? 'border-transparent bg-slate-100 text-slate-500'
                                     : isNoWork
                                       ? 'border-sky-200 bg-sky-50 text-sky-700'
-                                    : isFilled
-                                      ? 'border-emerald-200 bg-emerald-100 text-emerald-900'
-                                      : isMissing
-                                        ? 'border-rose-200 bg-rose-50 text-rose-700'
-                                        : 'border-border bg-background text-foreground'
+                                      : isFilled
+                                        ? 'border-emerald-200 bg-emerald-100 text-emerald-900'
+                                        : isMissing
+                                          ? 'border-rose-200 bg-rose-50 text-rose-700'
+                                          : 'border-border bg-background text-foreground'
                             } ${isToday && !isSelected ? 'ring-2 ring-sky-300 ring-offset-1 ring-offset-background' : ''}`}
                             disabled={!day.isCurrentMonth}
                             onClick={() => syncSelectedDate(day.key, true)}
@@ -568,35 +839,147 @@ export function DailyLog({
                   ))}
                 </div>
               </div>
-            ) : null}
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <button
+                    aria-label="Show previous week"
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-background text-foreground transition hover:bg-card"
+                    onClick={() => handleWeekChange(-1)}
+                    type="button"
+                  >
+                    ‹
+                  </button>
+                  <div className="text-center">
+                    <div className="text-sm font-semibold text-foreground">{getMonthLabel(visibleMonthDate)}</div>
+                  </div>
+                  <button
+                    aria-label="Show next week"
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-background text-foreground transition hover:bg-card disabled:opacity-35"
+                    disabled={visibleWeekStartKey >= currentWeekStartKey}
+                    onClick={() => handleWeekChange(1)}
+                    type="button"
+                  >
+                    ›
+                  </button>
+                </div>
+
+                <div className="mt-4 grid grid-cols-7 gap-2">
+                  {visibleWeekDays.map((day) => {
+                    const isSelected = day.key === date
+                    const isToday = day.key === todayDateKey
+                    const isFilled = filledDateKeys.has(day.key)
+                    const isNoWork = noWorkDateKeys.has(day.key)
+                    const isMissing =
+                      day.key.slice(0, 7) === currentMonthKey &&
+                      !day.isWeekend &&
+                      day.key < todayDateKey &&
+                      !isFilled
+
+                    return (
+                      <button
+                        key={day.key}
+                        className={`relative min-h-[4.4rem] rounded-[1rem] border px-1 py-2 text-center transition ${
+                          isSelected
+                            ? 'border-primary bg-primary text-primary-foreground'
+                            : day.isWeekend
+                              ? 'border-transparent bg-slate-100 text-slate-500'
+                              : isNoWork
+                                ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                : isFilled
+                                  ? 'border-emerald-200 bg-emerald-100 text-emerald-900'
+                                  : isMissing
+                                    ? 'border-rose-200 bg-rose-50 text-rose-700'
+                                    : 'border-border bg-background text-foreground'
+                        } ${isToday && !isSelected ? 'ring-2 ring-sky-300 ring-offset-1 ring-offset-muted/75' : ''}`}
+                        onClick={() => syncSelectedDate(day.key)}
+                        type="button"
+                      >
+                        <span className="block text-[11px] font-semibold uppercase tracking-[0.12em] opacity-75">
+                          {getCompactDayLabel(day.date)}
+                        </span>
+                        <span className="mt-2 block text-lg font-semibold">{day.date.getDate()}</span>
+                        {isFilled && !isSelected ? (
+                          <span
+                            className={`absolute bottom-2 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full ${
+                              isNoWork ? 'bg-sky-500' : 'bg-emerald-600'
+                            }`}
+                          />
+                        ) : null}
+                        {isMissing && !isSelected ? (
+                          <span className="absolute bottom-2 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-rose-500" />
+                        ) : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-foreground">
+                Selected: {formatDate(parseDateKey(date))}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className="rounded-full bg-background px-3 py-2 text-sm font-medium text-foreground transition hover:bg-card"
+                  onClick={resetToCurrentDayAndWeek}
+                  type="button"
+                >
+                  Today
+                </button>
+                <button
+                  className="rounded-full bg-background px-3 py-2 text-sm font-medium text-foreground transition hover:bg-card"
+                  onClick={() => setIsMonthExpanded((currentValue) => !currentValue)}
+                  type="button"
+                >
+                  {isMonthExpanded ? 'Hide month' : 'Show month'}
+                </button>
+              </div>
+            </div>
+
           </div>
 
           <label className="block">
             <span className="mb-2 block text-sm font-medium text-foreground">Billed hours</span>
             <input
               ref={hoursInputRef}
-              className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary"
+              className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition ${
+                currentInvalidFields.hours
+                  ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
+                  : 'border-border focus:border-primary'
+              }`}
               disabled={isSelectedDayMarkedNoWork}
               type="number"
               min="0"
               step="0.25"
               placeholder={settings.defaultShiftHours?.toString() ?? ''}
               value={hours}
-              onChange={(event) => setHours(event.target.value)}
+              onChange={(event) => {
+                updateDraftField('hours', event.target.value, 'hours')
+                setHours(event.target.value)
+              }}
             />
           </label>
 
           <label className="block">
             <span className="mb-2 block text-sm font-medium text-foreground">Invoice amount</span>
             <input
-              className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary"
+              className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition ${
+                currentInvalidFields.invoicedIncome
+                  ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
+                  : 'border-border focus:border-primary'
+              }`}
               disabled={isSelectedDayMarkedNoWork}
               type="number"
               min="0"
               step="0.01"
               placeholder={hasConfiguredInvoiceDefaults ? calculatedDefaultInvoiceAmount.toFixed(2) : ''}
               value={invoicedIncome}
-              onChange={(event) => setInvoicedIncome(event.target.value)}
+              onChange={(event) => {
+                updateDraftField('invoicedIncome', event.target.value, 'invoicedIncome')
+                setInvoicedIncome(event.target.value)
+              }}
             />
             <span className="mt-2 block text-xs text-muted-foreground">
               {hasConfiguredInvoiceDefaults
@@ -615,7 +998,10 @@ export function DailyLog({
               step="0.01"
               placeholder="0"
               value={paidIncome}
-              onChange={(event) => setPaidIncome(event.target.value)}
+              onChange={(event) => {
+                updateDraftField('paidIncome', event.target.value)
+                setPaidIncome(event.target.value)
+              }}
             />
             <span className="mt-2 block text-xs text-muted-foreground">
               Use this only when money actually came in.
@@ -632,7 +1018,10 @@ export function DailyLog({
               step="0.01"
               placeholder="0"
               value={expenses}
-              onChange={(event) => setExpenses(event.target.value)}
+              onChange={(event) => {
+                updateDraftField('expenses', event.target.value)
+                setExpenses(event.target.value)
+              }}
             />
           </label>
 
@@ -666,14 +1055,13 @@ export function DailyLog({
             </p>
           ) : null}
         </form>
-      </section>
+        </section>
 
-      <section className="space-y-3">
+        <section className="space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-muted-foreground">
             Entries For {getMonthLabel(visibleMonthDate)}
           </h2>
-          <span className="text-sm text-muted-foreground">{monthEntries.length} in view</span>
         </div>
 
         {monthEntries.length === 0 ? (
@@ -714,7 +1102,15 @@ export function DailyLog({
                       ) : null}
                     </div>
 
-                    <div className="text-right">
+                    <div className="flex flex-col items-end gap-3 text-right">
+                      <button
+                        aria-label={`Delete entry for ${formatDate(entryDate)}`}
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-muted text-muted-foreground transition hover:bg-rose-50 hover:text-rose-700"
+                        onClick={() => handleRequestDeleteEntry(entry)}
+                        type="button"
+                      >
+                        <TrashIcon />
+                      </button>
                       {entry.dayStatus === 'no_work' ? (
                         <span className="rounded-full bg-sky-100 px-3 py-1 text-xs font-medium text-sky-700">
                           Handled
@@ -734,7 +1130,29 @@ export function DailyLog({
             })}
           </div>
         )}
-      </section>
-    </div>
+        </section>
+      </div>
+    </>
+  )
+}
+
+function TrashIcon() {
+  return (
+    <svg aria-hidden="true" className="h-4 w-4" fill="none" viewBox="0 0 24 24">
+      <path
+        d="M4.5 7.5h15M9.5 3.75h5l.6 1.5h3.15a.75.75 0 0 1 0 1.5H5.75a.75.75 0 0 1 0-1.5H8.9l.6-1.5Z"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+      <path
+        d="M7.5 7.5v9a1.5 1.5 0 0 0 1.5 1.5h6a1.5 1.5 0 0 0 1.5-1.5v-9M10 11v4.75M14 11v4.75"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.7"
+      />
+    </svg>
   )
 }
