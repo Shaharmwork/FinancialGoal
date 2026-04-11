@@ -10,6 +10,7 @@ export const defaultSettings: Settings = {
   weeklyHoursTarget: 30,
   reserveBufferPercent: 5,
   qualifiesForSelfEmployedDeduction: true,
+  vacationDaysPerYear: 0,
 }
 
 export const emptySettings: Settings = {
@@ -20,29 +21,42 @@ export const emptySettings: Settings = {
   weeklyHoursTarget: null,
   reserveBufferPercent: null,
   qualifiesForSelfEmployedDeduction: null,
+  vacationDaysPerYear: null,
 }
 
 export const defaultMonthlySummaries: MonthlySummary[] = [
   {
     monthKey: '2026-01',
+    monthType: 'business',
     invoicedIncome: 4262.78,
     paidIncome: 4262.78,
     expenses: 1685.11,
     hours: 76.36,
+    grossSalary: null,
+    netSalaryReceived: null,
+    taxAlreadyWithheld: null,
   },
   {
     monthKey: '2026-02',
+    monthType: 'business',
     invoicedIncome: 1620.06,
     paidIncome: 0,
     expenses: 694.32,
     hours: 80.93,
+    grossSalary: null,
+    netSalaryReceived: null,
+    taxAlreadyWithheld: null,
   },
   {
     monthKey: '2026-03',
+    monthType: 'business',
     invoicedIncome: 11921.22,
     paidIncome: 0,
     expenses: 754.53,
     hours: 234.1,
+    grossSalary: null,
+    netSalaryReceived: null,
+    taxAlreadyWithheld: null,
   },
 ]
 
@@ -86,6 +100,10 @@ function readNullableBoolean(value: unknown) {
   return typeof value === 'boolean' ? value : null
 }
 
+function readMonthType(value: unknown) {
+  return value === 'employment' ? 'employment' : 'business'
+}
+
 function normalizeScreen(value: unknown): Screen {
   return value === 'dashboard' || value === 'daily-log' || value === 'configuration'
     ? value
@@ -107,6 +125,7 @@ export function normalizeSettings(value: unknown): Settings {
     qualifiesForSelfEmployedDeduction: readNullableBoolean(
       value.qualifiesForSelfEmployedDeduction,
     ),
+    vacationDaysPerYear: readNullableNumber(value.vacationDaysPerYear),
   }
 }
 
@@ -138,7 +157,10 @@ export function normalizeEntry(value: unknown): DailyEntry | null {
   return {
     id,
     date,
-    dayStatus: value.dayStatus === 'no_work' ? 'no_work' : 'worked',
+    dayStatus:
+      value.dayStatus === 'no_work' || value.dayStatus === 'vacation'
+        ? value.dayStatus
+        : 'worked',
     hours,
     invoicedIncome,
     paidIncome,
@@ -159,12 +181,18 @@ export function normalizeMonthlySummary(value: unknown): MonthlySummary | null {
     return null
   }
 
+  const monthType = readMonthType(value.monthType)
+
   return {
     monthKey,
-    invoicedIncome: readNumber(value.invoicedIncome ?? value.income, 0),
-    paidIncome: readNumber(value.paidIncome, 0),
-    expenses: readNumber(value.expenses ?? value.expense, 0),
-    hours: readNumber(value.hours, 0),
+    monthType,
+    invoicedIncome: readNullableNumber(value.invoicedIncome ?? value.income),
+    paidIncome: readNullableNumber(value.paidIncome),
+    expenses: readNullableNumber(value.expenses ?? value.expense),
+    hours: readNullableNumber(value.hours),
+    grossSalary: readNullableNumber(value.grossSalary),
+    netSalaryReceived: readNullableNumber(value.netSalaryReceived),
+    taxAlreadyWithheld: readNullableNumber(value.taxAlreadyWithheld),
   }
 }
 

@@ -1,23 +1,24 @@
-const LOCALE = 'en-NL'
+const NUMBER_LOCALE = 'en-US'
+const DATE_LOCALE = 'en-NL'
 
-const currencyFormatter = new Intl.NumberFormat(LOCALE, {
+const currencyFormatter = new Intl.NumberFormat(NUMBER_LOCALE, {
   style: 'currency',
   currency: 'EUR',
   maximumFractionDigits: 0,
 })
 
-const preciseCurrencyFormatter = new Intl.NumberFormat(LOCALE, {
+const preciseCurrencyFormatter = new Intl.NumberFormat(NUMBER_LOCALE, {
   style: 'currency',
   currency: 'EUR',
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 })
 
-const numberFormatter = new Intl.NumberFormat(LOCALE, {
+const numberFormatter = new Intl.NumberFormat(NUMBER_LOCALE, {
   maximumFractionDigits: 1,
 })
 
-const preciseNumberFormatter = new Intl.NumberFormat(LOCALE, {
+const preciseNumberFormatter = new Intl.NumberFormat(NUMBER_LOCALE, {
   maximumFractionDigits: 2,
 })
 
@@ -42,7 +43,7 @@ export function formatPreciseNumber(value: number) {
 }
 
 export function formatDate(date: Date) {
-  return date.toLocaleDateString(LOCALE, {
+  return date.toLocaleDateString(DATE_LOCALE, {
     weekday: 'short',
     day: 'numeric',
     month: 'short',
@@ -50,7 +51,7 @@ export function formatDate(date: Date) {
 }
 
 export function formatHeaderDate(date: Date) {
-  return date.toLocaleDateString(LOCALE, {
+  return date.toLocaleDateString(DATE_LOCALE, {
     day: 'numeric',
     month: 'short',
   })

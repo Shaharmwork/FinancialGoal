@@ -9,8 +9,12 @@ create table if not exists public.app_settings (
   spouse_monthly_income numeric not null default 0,
   reserve_buffer_percent numeric not null default 0,
   qualifies_for_self_employed_deduction boolean not null default false,
+  vacation_days_per_year numeric,
   updated_at timestamptz not null default timezone('utc', now())
 );
+
+alter table public.app_settings
+  add column if not exists vacation_days_per_year numeric;
 
 create table if not exists public.daily_entries (
   id text primary key,
@@ -32,20 +36,43 @@ alter table public.daily_entries
 
 alter table public.daily_entries
   add constraint daily_entries_day_status_check
-  check (day_status in ('worked', 'no_work'));
+  check (day_status in ('worked', 'no_work', 'vacation'));
 
 create table if not exists public.monthly_summaries (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null,
   month_key text not null,
-  hours numeric not null default 0,
-  invoiced_income numeric not null default 0,
-  paid_income numeric not null default 0,
-  expenses numeric not null default 0,
+  month_type text not null default 'business',
+  hours numeric,
+  invoiced_income numeric,
+  paid_income numeric,
+  expenses numeric,
+  gross_salary numeric,
+  net_salary_received numeric,
+  tax_already_withheld numeric,
   created_at timestamptz not null default timezone('utc', now()),
   updated_at timestamptz not null default timezone('utc', now()),
   unique (user_id, month_key)
 );
+
+alter table public.monthly_summaries
+  add column if not exists month_type text not null default 'business',
+  add column if not exists gross_salary numeric,
+  add column if not exists net_salary_received numeric,
+  add column if not exists tax_already_withheld numeric;
+
+alter table public.monthly_summaries
+  alter column hours drop not null,
+  alter column invoiced_income drop not null,
+  alter column paid_income drop not null,
+  alter column expenses drop not null;
+
+alter table public.monthly_summaries
+  drop constraint if exists monthly_summaries_month_type_check;
+
+alter table public.monthly_summaries
+  add constraint monthly_summaries_month_type_check
+  check (month_type in ('business', 'employment'));
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,

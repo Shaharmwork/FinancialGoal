@@ -1,9 +1,15 @@
 'use client'
 
-import { normalizeEntry } from './default-state'
-import type { DailyEntry, Screen } from './types'
+import { normalizeEntry, normalizeMonthlySummary, normalizeSettings } from './default-state'
+import type { DailyEntry, MonthlySummary, Screen, Settings } from './types'
+
+interface ConfigurationDraft {
+  monthlySummaries: MonthlySummary[]
+  settings: Settings
+}
 
 interface UserUiPreferences {
+  configurationDraft?: ConfigurationDraft
   currentScreen?: Screen
   reportDraftEntries?: DailyEntry[]
   reportDayFormDrafts?: Record<
@@ -191,6 +197,60 @@ export function clearUserReportDayFormDrafts(userId: string) {
   }
 
   const { reportDayFormDrafts, ...remainingPreferences } = currentPreferences
+
+  writeStoredPreferences({
+    ...storedPreferences,
+    [userId]: remainingPreferences,
+  })
+}
+
+export function getUserConfigurationDraft(userId: string): ConfigurationDraft | null {
+  const userPreferences = readStoredPreferences()[userId]
+  const configurationDraft = userPreferences?.configurationDraft
+
+  if (
+    typeof configurationDraft !== 'object' ||
+    configurationDraft === null ||
+    !Array.isArray(configurationDraft.monthlySummaries)
+  ) {
+    return null
+  }
+
+  const normalizedSummaries = configurationDraft.monthlySummaries
+    .map((summary) => normalizeMonthlySummary(summary))
+    .filter((summary): summary is MonthlySummary => summary !== null)
+
+  return {
+    monthlySummaries: normalizedSummaries,
+    settings: normalizeSettings(configurationDraft.settings),
+  }
+}
+
+export function updateUserConfigurationDraft(
+  userId: string,
+  configurationDraft: ConfigurationDraft,
+) {
+  const storedPreferences = readStoredPreferences()
+  const currentPreferences = storedPreferences[userId] ?? {}
+
+  writeStoredPreferences({
+    ...storedPreferences,
+    [userId]: {
+      ...currentPreferences,
+      configurationDraft,
+    },
+  })
+}
+
+export function clearUserConfigurationDraft(userId: string) {
+  const storedPreferences = readStoredPreferences()
+  const currentPreferences = storedPreferences[userId]
+
+  if (!currentPreferences) {
+    return
+  }
+
+  const { configurationDraft, ...remainingPreferences } = currentPreferences
 
   writeStoredPreferences({
     ...storedPreferences,
