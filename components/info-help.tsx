@@ -1,10 +1,11 @@
 'use client'
 
 import { useEffect, useId, useState } from 'react'
+import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 interface InfoHelpProps {
-  body: string
+  body: ReactNode
   title: string
 }
 
@@ -77,7 +78,13 @@ export function InfoHelp({ body, title }: InfoHelpProps) {
                     </span>
                   </button>
                 </div>
-                <p className="mt-3 text-sm leading-6 text-muted-foreground">{body}</p>
+                <div className="mt-3 text-sm leading-6 text-muted-foreground">
+                  {typeof body === 'string' ? (
+                    <p className="whitespace-pre-line">{body}</p>
+                  ) : (
+                    body
+                  )}
+                </div>
               </div>
             </div>,
             document.body,

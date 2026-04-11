@@ -34,10 +34,14 @@ export function Dashboard({
   onFillMissingDays,
   settings,
 }: DashboardProps) {
+  const now = new Date()
   const week = getCurrentWeekStats(entries, settings)
+  const invoicedThisWeek = getCurrentWeekInvoicedIncome(entries, now)
   const month = getCurrentMonthStats(entries, monthlySummaries, settings)
   const year = getCurrentYearStats(entries, monthlySummaries, settings)
-  const now = new Date()
+  const projectedTakeHome = year.projectedAnnualNet
+  const yearlyNetGoal = settings.targetNetMonth ? settings.targetNetMonth * 12 : 0
+  const beforeTaxTarget = year.goalAnnualBusinessProfit
   const greeting = getGreeting(now, displayName)
   const hasBusinessHistory = entries.length > 0 || monthlySummaries.length > 0
   const setupCompleteness = getSetupCompleteness(settings, monthlySummaries, now)
@@ -50,23 +54,23 @@ export function Dashboard({
       : 'Ready'
   const shouldShowSetupCard =
     baseConfigurationStatus !== 'Ready' || !setupCompleteness.previousMonthsComplete
-  const projectedProfit = year.projectedAnnualProfit
+  const projectedProfit = year.projectedAnnualPreTaxIncome
   const gapToGoal =
-    projectedProfit === undefined
+    projectedTakeHome === undefined
       ? undefined
-      : Math.max(0, year.goalAnnualBusinessProfit - projectedProfit)
+      : Math.max(0, yearlyNetGoal - projectedTakeHome)
   const amountAhead =
-    projectedProfit === undefined
+    projectedTakeHome === undefined
       ? undefined
-      : Math.max(0, projectedProfit - year.goalAnnualBusinessProfit)
+      : Math.max(0, projectedTakeHome - yearlyNetGoal)
   const goalProgress =
-    projectedProfit === undefined || year.goalAnnualBusinessProfit <= 0
+    projectedTakeHome === undefined || yearlyNetGoal <= 0
       ? undefined
-      : Math.min(100, (projectedProfit / year.goalAnnualBusinessProfit) * 100)
+      : Math.min(100, (projectedTakeHome / yearlyNetGoal) * 100)
   const monthsRemaining = Math.max(1, 12 - now.getMonth())
   const neededMonthlyAverage =
     gapToGoal === undefined || gapToGoal <= 0 ? 0 : gapToGoal / monthsRemaining
-  const status = getTargetStatus(projectedProfit, year.goalAnnualBusinessProfit)
+  const status = getTargetStatus(projectedTakeHome, yearlyNetGoal)
   const effortLabel = getEffortLabel(neededMonthlyAverage, projectedProfit)
 
   return (
@@ -152,6 +156,9 @@ export function Dashboard({
             <span className="rounded-full bg-white/72 px-3 py-2 font-medium text-foreground">
               Goal {formatHours(week.goalHours)}
             </span>
+            <span className="rounded-full bg-white/72 px-3 py-2 font-medium text-foreground">
+              Invoiced this week {formatCurrency(invoicedThisWeek)}
+            </span>
           </div>
           {!hasBusinessHistory ? (
             <p className="mt-4 max-w-xs text-sm text-foreground/75">
@@ -173,7 +180,7 @@ export function Dashboard({
               <div className="flex items-center justify-between gap-3">
                 <span className="max-w-[11rem] text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
-                    <span>Reserved Tax amount so far from previous months</span>
+                    <span>Tax reserved so far</span>
                     <InfoHelp
                       body="This is the running reserve target built from earlier completed months. It gives this month’s tax planning card a head start before the current month estimate is added."
                       title="Reserved tax from previous months"
@@ -189,7 +196,7 @@ export function Dashboard({
               <div className="flex items-center justify-between gap-3">
                 <span className="max-w-[11rem] text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
-                    <span>Forecast calculated tax to save this month</span>
+                    <span>Tax to save this month</span>
                     <InfoHelp
                       body="This estimates what to reserve from the current month so your year-to-date tax buffer stays on pace, including your reserve buffer percentage."
                       title="Tax to save this month"
@@ -211,24 +218,25 @@ export function Dashboard({
         </article>
 
         <article className="rounded-[1.8rem] border border-border bg-card p-4 shadow-sm">
-          <div className="text-sm font-semibold text-foreground">Cash Received This Month</div>
+          <div className="text-sm font-semibold text-foreground">Paid amount received this month</div>
+          <p className="mt-1 text-xs text-muted-foreground">Amounts shown exclude VAT.</p>
           <p className="mt-3 text-2xl font-semibold text-foreground">
             {hasBusinessHistory ? formatCurrency(month.paidIncome) : '—'}
           </p>
           {hasBusinessHistory ? (
             <div className="mt-3 space-y-2 text-sm">
               <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Invoiced</span>
+                <span className="text-muted-foreground">Invoiced amount (excl. VAT)</span>
                 <span className="font-semibold text-foreground">{formatCurrency(month.invoicedIncome)}</span>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Still open</span>
+                <span className="text-muted-foreground">Not yet paid (excl. VAT)</span>
                 <span className="font-semibold text-foreground">{formatCurrency(month.cashOutstanding)}</span>
               </div>
             </div>
           ) : (
             <p className="mt-3 text-sm text-muted-foreground">
-              Paid and open cash totals will appear after your first report.
+              Paid and unpaid business amounts will appear after your first report.
             </p>
           )}
         </article>
@@ -238,33 +246,37 @@ export function Dashboard({
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-semibold text-foreground">Projected yearly profit</h2>
+              <h2 className="text-base font-semibold text-foreground">Projected yearly take-home income</h2>
               <InfoHelp
-                body="This projects your yearly business profit from invoiced income minus expenses. It uses the pace of the data you already entered, not paid cash."
-                title="Projected yearly profit"
+                body="This is your projected yearly income after estimated tax. It compares your projected take-home income against your net yearly goal. The smaller supporting figure shows your projected yearly result before income tax."
+                title="Projected yearly take-home income"
               />
             </div>
-            <p className="mt-1 text-xs text-muted-foreground">Uses invoiced income, not paid cash.</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              After estimated tax, based on your current yearly projection.
+            </p>
           </div>
-          <span className="rounded-full bg-muted px-3 py-1 text-[11px] font-medium text-muted-foreground">
-            Goal {formatCurrency(year.goalAnnualBusinessProfit)}
-          </span>
+          <div className="text-right">
+            <div className="rounded-full bg-muted px-3 py-1 text-[11px] font-medium text-muted-foreground">
+              Net goal {formatCurrency(yearlyNetGoal)}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Before-tax target {formatCurrency(beforeTaxTarget)}
+            </p>
+          </div>
         </div>
 
         <div className="mt-4 flex items-end justify-between gap-4">
           <div>
             <p className="text-3xl font-semibold text-foreground">
-              {projectedProfit === undefined ? '—' : formatCurrency(projectedProfit)}
+              {projectedTakeHome === undefined ? '—' : formatCurrency(projectedTakeHome)}
             </p>
             <p className="mt-2 text-sm text-muted-foreground">
-              {getRecommendation({
-                amountAhead,
-                gapToGoal,
-                monthsRemaining,
-                neededMonthlyAverage,
-                projectedProfit,
-                goal: year.goalAnnualBusinessProfit,
-              })}
+              {projectedTakeHome === undefined
+                ? 'Projection starts after your first real entries.'
+                : gapToGoal && gapToGoal > 0
+                  ? `Need about ${formatCurrency(neededMonthlyAverage)} more take-home income per month for the next ${monthsRemaining} months.`
+                  : `About ${formatCurrency(amountAhead ?? 0)} ahead. Keep the pace steady.`}
             </p>
           </div>
           <div className="min-w-24 rounded-[1.35rem] bg-muted px-3 py-3 text-right">
@@ -277,21 +289,21 @@ export function Dashboard({
 
         <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
           <div className="rounded-[1.35rem] bg-muted/75 px-3 py-3">
-            <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Goal</div>
+            <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Net goal</div>
             <div className="mt-2 font-semibold text-foreground">
-              {formatCurrency(year.goalAnnualBusinessProfit)}
+              {formatCurrency(yearlyNetGoal)}
             </div>
           </div>
           <div className="rounded-[1.35rem] bg-muted/75 px-3 py-3">
-            <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Gap</div>
+            <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Before tax</div>
             <div className="mt-2 font-semibold text-foreground">
-              {gapToGoal === undefined ? '—' : formatCurrency(gapToGoal)}
+              {projectedProfit === undefined ? '—' : formatCurrency(projectedProfit)}
             </div>
           </div>
           <div className="rounded-[1.35rem] bg-muted/75 px-3 py-3">
             <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Need / mo</div>
             <div className="mt-2 font-semibold text-foreground">
-              {projectedProfit === undefined ? '—' : formatCurrency(neededMonthlyAverage)}
+              {projectedTakeHome === undefined ? '—' : formatCurrency(neededMonthlyAverage)}
             </div>
           </div>
         </div>
@@ -302,7 +314,7 @@ export function Dashboard({
           <div className="flex items-center gap-2">
             <h2 className="text-base font-semibold text-foreground">Projection vs goal</h2>
             <InfoHelp
-              body="This compares your projected yearly profit with the goal derived from your target net month. The progress bar and status update as your invoiced income and expenses change."
+              body="This compares your projected yearly take-home income against your yearly net goal. Status, progress, and monthly pace update as your projected yearly net income changes."
               title="Projection vs goal"
             />
           </div>
@@ -324,10 +336,8 @@ export function Dashboard({
             <div className="mt-2 font-semibold text-foreground">{status.label}</div>
           </div>
           <div className="rounded-[1.35rem] bg-muted/75 px-3 py-3">
-            <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Gap</div>
-            <div className="mt-2 font-semibold text-foreground">
-              {gapToGoal === undefined ? '—' : formatCurrency(gapToGoal)}
-            </div>
+            <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Months left</div>
+            <div className="mt-2 font-semibold text-foreground">{monthsRemaining}</div>
           </div>
           <div className="rounded-[1.35rem] bg-muted/75 px-3 py-3">
             <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Effort</div>
@@ -336,11 +346,11 @@ export function Dashboard({
         </div>
 
         <p className="mt-4 text-sm text-muted-foreground">
-          {projectedProfit === undefined
+          {projectedTakeHome === undefined
             ? 'Add a few real entries to start the target helper.'
             : gapToGoal && gapToGoal > 0
-              ? `To close the gap, aim for about ${formatCurrency(neededMonthlyAverage)} more profit per month.`
-              : `At this pace you are around ${formatCurrency(amountAhead ?? 0)} ahead of target.`}
+              ? `You need about ${formatCurrency(neededMonthlyAverage)} more take-home income per month to reach your net goal.`
+              : `At this pace you are around ${formatCurrency(amountAhead ?? 0)} ahead of your net goal.`}
         </p>
       </section>
     </div>
@@ -388,6 +398,27 @@ function SetupChecklistItem({
       </span>
     </button>
   )
+}
+
+function getCurrentWeekInvoicedIncome(entries: DailyEntry[], now: Date) {
+  const weekStart = new Date(now)
+  const day = weekStart.getDay()
+  const diffToMonday = day === 0 ? -6 : 1 - day
+  weekStart.setDate(weekStart.getDate() + diffToMonday)
+  weekStart.setHours(0, 0, 0, 0)
+
+  const weekEnd = new Date(weekStart)
+  weekEnd.setDate(weekEnd.getDate() + 7)
+
+  return entries.reduce((total, entry) => {
+    const entryDate = new Date(`${entry.date}T00:00:00`)
+
+    if (entryDate >= weekStart && entryDate < weekEnd) {
+      return total + entry.invoicedIncome
+    }
+
+    return total
+  }, 0)
 }
 
 function getGreeting(now: Date, displayName?: string) {
@@ -478,5 +509,5 @@ function getRecommendation({
     return `About ${formatCurrency(amountAhead ?? 0)} ahead. Keep the pace steady.`
   }
 
-  return `Need about ${formatCurrency(neededMonthlyAverage)} profit per month for the next ${monthsRemaining} months.`
+  return `Need about ${formatCurrency(neededMonthlyAverage)} more before-tax income per month for the next ${monthsRemaining} months.`
 }

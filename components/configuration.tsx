@@ -1,6 +1,7 @@
 'use client'
 
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -9,12 +10,23 @@ import {
   type FormEvent,
   type MouseEvent,
   type RefObject,
-  type TouchEvent,
 } from 'react'
 import { InfoHelp } from '@/components/info-help'
 import { WarningModal } from '@/components/warning-modal'
 import { defaultSettings } from '@/lib/default-state'
+import { getDutchPublicHolidayWeekdays, getPlanningConsistency } from '@/lib/calculations'
+import { formatCurrency, formatHours } from '@/lib/formatters'
+import {
+  clearUserConfigurationDraft,
+  getUserConfigurationDraft,
+  updateUserConfigurationDraft,
+} from '@/lib/ui-preferences'
 import type { DailyEntry, MonthlySummary, Settings } from '@/lib/types'
+
+export interface ConfigurationNavigationHandlers {
+  discard: () => void
+  save: () => Promise<boolean>
+}
 
 interface ConfigurationProps {
   backfillFocusRequest?: number
@@ -23,6 +35,10 @@ interface ConfigurationProps {
   settings: Settings
   monthlySummaries: MonthlySummary[]
   onSaveConfiguration: (settings: Settings, monthlySummaries: MonthlySummary[]) => Promise<void>
+  onDeleteSavedMonthSummary: (monthKey: string) => Promise<void>
+  onRegisterNavigationHandlers?: (handlers: ConfigurationNavigationHandlers | null) => void
+  onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void
+  userId?: string
 }
 
 interface FieldProps {
@@ -64,7 +80,13 @@ interface PendingDeleteMonthSummary {
   monthKey: string
 }
 
-type SummaryFieldKey = 'monthKey' | 'hours' | 'invoicedIncome'
+type SummaryFieldKey =
+  | 'monthKey'
+  | 'hours'
+  | 'invoicedIncome'
+  | 'grossSalary'
+  | 'netSalaryReceived'
+  | 'taxAlreadyWithheld'
 type SettingsFieldKey =
   | 'targetNetMonth'
   | 'weeklyHoursTarget'
@@ -72,9 +94,26 @@ type SettingsFieldKey =
   | 'defaultShiftHours'
   | 'reserveBufferPercent'
   | 'qualifiesForSelfEmployedDeduction'
+  | 'vacationDaysPerYear'
 
 type InvalidSettingsState = Partial<Record<SettingsFieldKey, boolean>>
 type InvalidSummaryFieldsState = Record<string, Partial<Record<SummaryFieldKey, boolean>>>
+
+interface SummaryConsistencyValidationIssue extends MonthSummaryValidationIssue {
+  invalidFields: Partial<Record<SummaryFieldKey, boolean>>
+  rowKey: string
+}
+
+const BUSINESS_MONTH_VAT_EXPLANATION =
+  'months, To keep your take-home projection and yearly tax estimate accurate, enter income and expenses excluding VAT.'
+const BEFORE_TAX_AMOUNT_EXPLANATION =
+  "Invoiced amount (excl. VAT) minus Business expenses (excl. VAT) gives that month's before-tax amount."
+const MONTH_TOTALS_PURPOSE_EXPLANATION =
+  'Use this section to add older business or employment / pre-business months to avoid the need to add each of their working day manually. These month totals help the app calculate your yearly pace, target progress, and tax planning more accurately.'
+const BUSINESS_MONTH_TOTALS_USAGE_EXPLANATION =
+  'If a month already has daily entries, those entries remain the source of truth for calculations.'
+const TAX_ALREADY_WITHHELD_EXPLANATION =
+  'This is the tax already deducted by your employer for that month. You can usually find it on your payslip under wage tax, payroll tax, or a similar tax deduction line.'
 
 function parseNumber(value: string) {
   const parsed = Number(value)
@@ -90,28 +129,20 @@ function parseOptionalNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-function selectPrefilledZero(event: FocusEvent<HTMLInputElement>) {
-  const normalizedValue = event.currentTarget.value.trim()
+function selectPrefilledZero(input: HTMLInputElement) {
+  const normalizedValue = input.value.trim()
 
   if (normalizedValue === '0' || normalizedValue === '0.00') {
-    event.currentTarget.select()
+    input.select()
   }
 }
 
-function preservePrefilledZeroSelectionOnMouseUp(event: MouseEvent<HTMLInputElement>) {
-  const normalizedValue = event.currentTarget.value.trim()
-
-  if (normalizedValue === '0' || normalizedValue === '0.00') {
-    event.preventDefault()
-  }
+function selectPrefilledZeroOnFocus(event: FocusEvent<HTMLInputElement>) {
+  selectPrefilledZero(event.currentTarget)
 }
 
-function preservePrefilledZeroSelectionOnTouchEnd(event: TouchEvent<HTMLInputElement>) {
-  const normalizedValue = event.currentTarget.value.trim()
-
-  if (normalizedValue === '0' || normalizedValue === '0.00') {
-    event.preventDefault()
-  }
+function selectPrefilledZeroOnClick(event: MouseEvent<HTMLInputElement>) {
+  selectPrefilledZero(event.currentTarget)
 }
 
 function sortMonthlySummariesNewestFirst(summaries: MonthlySummary[]) {
@@ -198,6 +229,11 @@ function getMissingBaseConfigurationFields(settings: Settings) {
     missingFieldKeys.push('reserveBufferPercent')
   }
 
+  if (typeof settings.vacationDaysPerYear === 'number' && settings.vacationDaysPerYear < 0) {
+    missingFields.push('vacation days per year')
+    missingFieldKeys.push('vacationDaysPerYear')
+  }
+
   if (typeof settings.qualifiesForSelfEmployedDeduction !== 'boolean') {
     missingFields.push('self-employed deduction setting')
     missingFieldKeys.push('qualifiesForSelfEmployedDeduction')
@@ -222,11 +258,31 @@ function getInvalidSummaryFields(
     invalidFields.monthKey = true
   }
 
+  if (summary.monthType === 'employment') {
+    if (!(typeof summary.grossSalary === 'number' && summary.grossSalary > 0)) {
+      invalidFields.grossSalary = true
+    }
+
+    if (!(typeof summary.netSalaryReceived === 'number' && summary.netSalaryReceived >= 0)) {
+      invalidFields.netSalaryReceived = true
+    }
+
+    if (!(typeof summary.taxAlreadyWithheld === 'number' && summary.taxAlreadyWithheld >= 0)) {
+      invalidFields.taxAlreadyWithheld = true
+    }
+
+    return invalidFields
+  }
+
+  const hours = summary.hours ?? 0
+  const invoicedIncome = summary.invoicedIncome ?? 0
+  const paidIncome = summary.paidIncome ?? 0
+  const expenses = summary.expenses ?? 0
   const hasAnyValue =
-    summary.hours > 0 ||
-    summary.invoicedIncome > 0 ||
-    summary.paidIncome > 0 ||
-    summary.expenses > 0
+    hours > 0 ||
+    invoicedIncome > 0 ||
+    paidIncome > 0 ||
+    expenses > 0
 
   if (!hasAnyValue) {
     invalidFields.hours = true
@@ -235,17 +291,17 @@ function getInvalidSummaryFields(
   }
 
   const isExpenseOnlySummary =
-    summary.expenses > 0 &&
-    summary.hours <= 0 &&
-    summary.invoicedIncome <= 0 &&
-    summary.paidIncome <= 0
+    expenses > 0 &&
+    hours <= 0 &&
+    invoicedIncome <= 0 &&
+    paidIncome <= 0
 
   if (!isExpenseOnlySummary) {
-    if (!(summary.hours > 0)) {
+    if (!(hours > 0)) {
       invalidFields.hours = true
     }
 
-    if (!(summary.invoicedIncome > 0)) {
+    if (!(invoicedIncome > 0)) {
       invalidFields.invoicedIncome = true
     }
   }
@@ -265,6 +321,72 @@ function getInvalidSummaryFieldMap(
 
     return currentValue
   }, {})
+}
+
+function getEmploymentSummaryConsistencyIssue(
+  summaries: MonthlySummary[],
+): SummaryConsistencyValidationIssue | null {
+  for (const [index, summary] of summaries.entries()) {
+    if (summary.monthType !== 'employment') {
+      continue
+    }
+
+    const { grossSalary, netSalaryReceived, taxAlreadyWithheld } = summary
+    const rowKey = getSummaryRowKey(summary, index)
+
+    if (
+      typeof grossSalary === 'number' &&
+      typeof netSalaryReceived === 'number' &&
+      grossSalary < netSalaryReceived
+    ) {
+      return {
+        invalidFields: {
+          grossSalary: true,
+          netSalaryReceived: true,
+        },
+        message: 'Gross salary must be at least as high as net salary received.',
+        rowKey,
+        title: 'Check employment salary values',
+      }
+    }
+
+    if (
+      typeof grossSalary === 'number' &&
+      typeof netSalaryReceived === 'number' &&
+      typeof taxAlreadyWithheld === 'number' &&
+      taxAlreadyWithheld > grossSalary - netSalaryReceived
+    ) {
+      return {
+        invalidFields: {
+          taxAlreadyWithheld: true,
+        },
+        message:
+          'Tax already withheld cannot be higher than gross salary minus net salary received.',
+        rowKey,
+        title: 'Check withheld tax value',
+      }
+    }
+  }
+
+  return null
+}
+
+function sanitizeMonthlySummaryForSave(summary: MonthlySummary): MonthlySummary {
+  if (summary.monthType === 'employment') {
+    return {
+      ...summary,
+      expenses: null,
+      invoicedIncome: null,
+      paidIncome: null,
+    }
+  }
+
+  return {
+    ...summary,
+    grossSalary: null,
+    netSalaryReceived: null,
+    taxAlreadyWithheld: null,
+  }
 }
 
 function getConfigurationValidationIssue({
@@ -293,7 +415,7 @@ function getConfigurationValidationIssue({
   return {
     title: 'Complete month summary fields',
     message:
-      'Some month summaries still need required fields. Worked month summaries need both hours and invoiced income. Expense-only month summaries are allowed. If a month truly has zero totals, remove it completely instead.',
+      'Some month summaries still need required fields. Business month summaries need hours worked and invoiced amount (excl. VAT), unless they are expense-only. Employment / pre-business months need gross salary, net salary received, and tax already withheld.',
   }
 }
 
@@ -339,7 +461,7 @@ function SettingField({
             onClick={onSetDefault}
             type="button"
           >
-            Use Default
+            Use default
           </button>
         ) : null}
       </span>
@@ -399,7 +521,7 @@ function ToggleField({
             onClick={onSetDefault}
             type="button"
           >
-            Use Default
+            Use default
           </button>
         ) : null}
       </span>
@@ -444,11 +566,16 @@ export function Configuration({
   settings,
   monthlySummaries,
   onSaveConfiguration,
+  onDeleteSavedMonthSummary,
+  onRegisterNavigationHandlers,
+  onUnsavedChangesChange,
+  userId,
 }: ConfigurationProps) {
   const [draftSettings, setDraftSettings] = useState(settings)
   const [draftMonthlySummaries, setDraftMonthlySummaries] = useState(() =>
     sortMonthlySummariesNewestFirst(monthlySummaries),
   )
+  const [hasHydratedConfigurationDraft, setHasHydratedConfigurationDraft] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [formMessage, setFormMessage] = useState('')
   const [isErrorMessage, setIsErrorMessage] = useState(false)
@@ -468,12 +595,19 @@ export function Configuration({
   const [pendingMonthFocusRowKey, setPendingMonthFocusRowKey] = useState<string | null>(null)
 
   useEffect(() => {
-    setDraftSettings(settings)
-  }, [settings])
+    const savedDraft = userId ? getUserConfigurationDraft(userId) : null
 
-  useEffect(() => {
+    if (savedDraft) {
+      setDraftSettings(savedDraft.settings)
+      setDraftMonthlySummaries(sortMonthlySummariesNewestFirst(savedDraft.monthlySummaries))
+      setHasHydratedConfigurationDraft(true)
+      return
+    }
+
+    setDraftSettings(settings)
     setDraftMonthlySummaries(sortMonthlySummariesNewestFirst(monthlySummaries))
-  }, [monthlySummaries])
+    setHasHydratedConfigurationDraft(true)
+  }, [monthlySummaries, settings, userId])
 
   useEffect(() => {
     if (settingsFocusRequest <= 0) {
@@ -528,12 +662,18 @@ export function Configuration({
     () => new Set(entries.map((entry) => entry.date.slice(0, 7))),
     [entries],
   )
+  const planningConsistency = useMemo(
+    () => getPlanningConsistency(draftSettings),
+    [draftSettings],
+  )
+  const dutchPublicHolidayWeekdays = getDutchPublicHolidayWeekdays(new Date().getFullYear()).length
+  const plannedVacationDaysPerYear = draftSettings.vacationDaysPerYear ?? 0
 
   const showWarningModal = (issue: MonthSummaryValidationIssue) => {
     setWarningModalIssue(issue)
   }
 
-  const getMonthValidationIssue = ({
+  const getMonthValidationIssue = useCallback(({
     includeDailyEntryConflict = true,
     indexToIgnore,
     monthKey,
@@ -587,12 +727,12 @@ export function Configuration({
       return {
         title: 'Detailed reports already exist',
         message:
-          'This month already has detailed daily reports. Month summaries should only be used when there are no daily reports for that month.',
+          'This month already has detailed daily reports. It cannot be saved as an employment / pre-business month unless those daily reports are removed first.',
       }
     }
 
     return null
-  }
+  }, [entryMonthKeys, sortedDraftSummaries])
 
   useEffect(() => {
     if (!pendingMonthFocusRowKey) {
@@ -642,20 +782,55 @@ export function Configuration({
     JSON.stringify(draftSettings) !== JSON.stringify(settings) ||
     JSON.stringify(sortedDraftSummaries) !== JSON.stringify(sortedSavedSummaries)
 
+  useEffect(() => {
+    onUnsavedChangesChange?.(hasPendingChanges)
+  }, [hasPendingChanges, onUnsavedChangesChange])
+
+  useEffect(() => {
+    if (!userId || !hasHydratedConfigurationDraft) {
+      return
+    }
+
+    if (hasPendingChanges) {
+      updateUserConfigurationDraft(userId, {
+        monthlySummaries: sortedDraftSummaries,
+        settings: draftSettings,
+      })
+      return
+    }
+
+    clearUserConfigurationDraft(userId)
+  }, [
+    draftSettings,
+    hasHydratedConfigurationDraft,
+    hasPendingChanges,
+    sortedDraftSummaries,
+    userId,
+  ])
+
   const unfinishedNewSummary = sortedDraftSummaries.find((summary) =>
     isIncompleteNewSummary(summary, savedMonthKeys),
   )
 
+  const refreshInvalidSummaryFieldsIfVisible = (summaries: MonthlySummary[]) => {
+    if (Object.keys(invalidSummaryFields).length === 0) {
+      return
+    }
+
+    setInvalidSummaryFields(getInvalidSummaryFieldMap(summaries))
+  }
+
   const updateSummaryField = (
     index: number,
     key: keyof MonthlySummary,
-    value: string | number,
+    value: string | number | null,
   ) => {
     resetFormMessage()
 
     if (key === 'monthKey') {
       const normalizedMonthKey = typeof value === 'string' ? value : String(value)
       const validationIssue = getMonthValidationIssue({
+        includeDailyEntryConflict: false,
         indexToIgnore: index,
         monthKey: normalizedMonthKey,
       })
@@ -681,7 +856,7 @@ export function Configuration({
 
     const nextSortedSummaries = sortMonthlySummariesNewestFirst(next)
     setDraftMonthlySummaries(nextSortedSummaries)
-    setInvalidSummaryFields(getInvalidSummaryFieldMap(nextSortedSummaries))
+    refreshInvalidSummaryFieldsIfVisible(nextSortedSummaries)
   }
 
   const addMonthSummary = () => {
@@ -721,10 +896,14 @@ export function Configuration({
 
     const nextSummary: MonthlySummary = {
       monthKey: nextMonthKey,
+      monthType: 'business',
       invoicedIncome: 0,
       paidIncome: 0,
       expenses: 0,
       hours: 0,
+      grossSalary: null,
+      netSalaryReceived: null,
+      taxAlreadyWithheld: null,
     }
 
     const nextSummaries = sortMonthlySummariesNewestFirst([...sortedDraftSummaries, nextSummary])
@@ -732,8 +911,27 @@ export function Configuration({
     const nextFocusRowKey = getSummaryRowKey(nextSummary, nextFocusIndex)
 
     setDraftMonthlySummaries(nextSummaries)
-    setInvalidSummaryFields(getInvalidSummaryFieldMap(nextSummaries))
+    refreshInvalidSummaryFieldsIfVisible(nextSummaries)
     setPendingMonthFocusRowKey(nextFocusRowKey)
+  }
+
+  const updateSummaryMonthType = (index: number, monthType: MonthlySummary['monthType']) => {
+    resetFormMessage()
+
+    const next = sortedDraftSummaries.map((summary, summaryIndex) => {
+      if (summaryIndex !== index) {
+        return summary
+      }
+
+      return {
+        ...summary,
+        monthType,
+      }
+    })
+
+    const nextSortedSummaries = sortMonthlySummariesNewestFirst(next)
+    setDraftMonthlySummaries(nextSortedSummaries)
+    refreshInvalidSummaryFieldsIfVisible(nextSortedSummaries)
   }
 
   const removeMonthSummary = (index: number) => {
@@ -742,7 +940,7 @@ export function Configuration({
       sortedDraftSummaries.filter((_, summaryIndex) => summaryIndex !== index),
     )
     setDraftMonthlySummaries(nextSummaries)
-    setInvalidSummaryFields(getInvalidSummaryFieldMap(nextSummaries))
+    refreshInvalidSummaryFieldsIfVisible(nextSummaries)
   }
 
   const requestRemoveMonthSummary = (index: number) => {
@@ -763,20 +961,60 @@ export function Configuration({
     })
   }
 
-  const confirmRemoveSavedMonthSummary = () => {
+  const confirmRemoveSavedMonthSummary = async () => {
     if (!pendingDeleteMonthSummary) {
       return
     }
-
-    removeMonthSummary(pendingDeleteMonthSummary.index)
+    // Store the pending delete info locally
+    const summaryToDelete = pendingDeleteMonthSummary
+    // Remove the summary from draft state
+    const nextSummaries = sortMonthlySummariesNewestFirst(
+      sortedDraftSummaries.filter((_, idx) => idx !== summaryToDelete.index)
+    )
     setPendingDeleteMonthSummary(null)
+    setDraftMonthlySummaries(nextSummaries)
+    refreshInvalidSummaryFieldsIfVisible(nextSummaries)
+
+    // If the month is not in savedMonthKeys, just update local state and return
+    if (!savedMonthKeys.has(summaryToDelete.monthKey)) {
+      setFormMessage('Month removed from draft.')
+      setIsErrorMessage(false)
+      return
+    }
+
+    // Persist the deletion of the saved month
+    setIsSaving(true)
+    setFormMessage('')
+    setIsErrorMessage(false)
+    try {
+      await onDeleteSavedMonthSummary(summaryToDelete.monthKey)
+      // If userId exists, keep the remaining unsaved draft
+      if (userId) {
+        updateUserConfigurationDraft(userId, {
+          settings: draftSettings,
+          monthlySummaries: nextSummaries,
+        })
+      }
+      setFormMessage('Month deleted.')
+      setIsErrorMessage(false)
+    } catch (error) {
+      setIsErrorMessage(true)
+      setFormMessage(error instanceof Error && error.message ? error.message : 'Delete failed.')
+      // Restore the deleted summary back into draft state and re-sort
+      const restored = sortMonthlySummariesNewestFirst([
+        ...nextSummaries,
+        sortedDraftSummaries[summaryToDelete.index],
+      ])
+      setDraftMonthlySummaries(restored)
+      refreshInvalidSummaryFieldsIfVisible(restored)
+    } finally {
+      setIsSaving(false)
+    }
   }
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-
+  const saveConfigurationDraft = useCallback(async () => {
     if (!hasPendingChanges) {
-      return
+      return true
     }
 
     const { missingFieldKeys, missingFields } = getMissingBaseConfigurationFields(draftSettings)
@@ -822,7 +1060,21 @@ export function Configuration({
         }
       }
 
-      return
+      return false
+    }
+
+    const employmentConsistencyIssue =
+      getEmploymentSummaryConsistencyIssue(sortedDraftSummaries)
+
+    if (employmentConsistencyIssue) {
+      setInvalidSummaryFields({
+        [employmentConsistencyIssue.rowKey]: employmentConsistencyIssue.invalidFields,
+      })
+      setIsErrorMessage(true)
+      setFormMessage(employmentConsistencyIssue.message)
+      showWarningModal(employmentConsistencyIssue)
+      setPendingMonthFocusRowKey(employmentConsistencyIssue.rowKey)
+      return false
     }
 
     const seenMonthKeys = new Set<string>()
@@ -830,7 +1082,7 @@ export function Configuration({
       if (!summary.monthKey) {
         setIsErrorMessage(true)
         setFormMessage('Choose a month before saving the summary.')
-        return
+        return false
       }
 
       const validationIssue = getMonthValidationIssue({
@@ -842,7 +1094,7 @@ export function Configuration({
         setIsErrorMessage(true)
         setFormMessage(validationIssue.message)
         showWarningModal(validationIssue)
-        return
+        return false
       }
 
       if (seenMonthKeys.has(summary.monthKey)) {
@@ -853,25 +1105,27 @@ export function Configuration({
         setIsErrorMessage(true)
         setFormMessage(duplicateIssue.message)
         showWarningModal(duplicateIssue)
-        return
+        return false
       }
       seenMonthKeys.add(summary.monthKey)
     }
 
     const conflictingNewSummary = sortedDraftSummaries.find(
-      (summary) => !savedMonthKeys.has(summary.monthKey) && entryMonthKeys.has(summary.monthKey),
+      (summary) =>
+        summary.monthType === 'employment' &&
+        entryMonthKeys.has(summary.monthKey),
     )
 
     if (conflictingNewSummary) {
       const conflictIssue = {
         title: 'Detailed reports already exist',
         message:
-          'This month already has detailed daily reports. Month summaries should only be used when there are no daily reports for that month.',
+          'This month already has detailed daily reports. Remove those daily reports before saving it as an employment / pre-business month.',
       }
       setIsErrorMessage(true)
       setFormMessage(conflictIssue.message)
       showWarningModal(conflictIssue)
-      return
+      return false
     }
 
     setIsSaving(true)
@@ -881,14 +1135,58 @@ export function Configuration({
     setInvalidSummaryFields({})
 
     try {
-      await onSaveConfiguration(draftSettings, sortedDraftSummaries)
+      const summariesToSave = sortedDraftSummaries.map(sanitizeMonthlySummaryForSave)
+      await onSaveConfiguration(draftSettings, summariesToSave)
+      if (userId) {
+        clearUserConfigurationDraft(userId)
+      }
       setFormMessage('Saved.')
+      return true
     } catch (error) {
       setIsErrorMessage(true)
       setFormMessage(error instanceof Error && error.message ? error.message : 'Save failed.')
+      return false
     } finally {
       setIsSaving(false)
     }
+  }, [
+    draftSettings,
+    entryMonthKeys,
+    getMonthValidationIssue,
+    hasPendingChanges,
+    onSaveConfiguration,
+    sortedDraftSummaries,
+    userId,
+  ])
+
+  const discardConfigurationDraft = useCallback(() => {
+    setDraftSettings(settings)
+    setDraftMonthlySummaries(sortMonthlySummariesNewestFirst(monthlySummaries))
+    setFormMessage('')
+    setIsErrorMessage(false)
+    setInvalidSettingFields({})
+    setInvalidSummaryFields({})
+    setWarningModalIssue(null)
+
+    if (userId) {
+      clearUserConfigurationDraft(userId)
+    }
+  }, [monthlySummaries, settings, userId])
+
+  useEffect(() => {
+    onRegisterNavigationHandlers?.({
+      discard: discardConfigurationDraft,
+      save: saveConfigurationDraft,
+    })
+
+    return () => {
+      onRegisterNavigationHandlers?.(null)
+    }
+  }, [discardConfigurationDraft, onRegisterNavigationHandlers, saveConfigurationDraft])
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    await saveConfigurationDraft()
   }
 
   return (
@@ -918,12 +1216,12 @@ export function Configuration({
         >
         <h2 className="text-lg font-semibold text-foreground">Configuration</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Base configuration is required before the dashboard can plan accurately.
+          Fill the required fields to unlock accurate planning.
         </p>
         <div className="mt-4 grid gap-4">
           <SettingField
             helpTitle="Target net month"
-            infoBody="Your monthly take-home goal. The dashboard uses this to work backward into the business profit you need for yearly pace and target tracking."
+            infoBody="Your monthly take-home goal. The dashboard uses this to work backward into the before-tax target you need for yearly pace and target tracking."
             inputRef={firstSettingsInputRef}
             invalid={invalidSettingFields.targetNetMonth === true}
             label="Target Net Month"
@@ -970,6 +1268,18 @@ export function Configuration({
             step={0.25}
           />
           <SettingField
+            helpTitle="Vacation days per year"
+            infoBody="Vacation days reduce the realistic work hours capacity used in the planning helper. This is only a planning assumption, not a separate tax rule."
+            invalid={invalidSettingFields.vacationDaysPerYear === true}
+            label="Vacation days per year"
+            disabled={isSaving}
+            onSetDefault={() => updateField('vacationDaysPerYear', dutchPublicHolidayWeekdays)}
+            placeholder="0"
+            value={draftSettings.vacationDaysPerYear}
+            onChange={(value) => updateField('vacationDaysPerYear', value)}
+            help={`NL ${new Date().getFullYear()} baseline: ${dutchPublicHolidayWeekdays} weekday public holidays. You may use that as your default, or adjust to your own plans.`}
+          />
+          <SettingField
             helpTitle="Spouse monthly income"
             infoBody="This is for a later combined household view on the dashboard. It does not change your own business tax calculation and is only for shared visibility."
             label="Spouse Monthly Income"
@@ -999,15 +1309,38 @@ export function Configuration({
             label="Qualifies For Self-Employed Deduction"
             checked={draftSettings.qualifiesForSelfEmployedDeduction}
             disabled={isSaving}
-            onSetDefault={() =>
-              updateField(
-                'qualifiesForSelfEmployedDeduction',
-                defaultSettings.qualifiesForSelfEmployedDeduction,
-              )
-            }
             onChange={(value) => updateField('qualifiesForSelfEmployedDeduction', value)}
             help="Affects the tax estimate used across the dashboard."
           />
+          {planningConsistency ? (
+            <div className="rounded-[1.35rem] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-950">
+              <p className="font-semibold">Planning check</p>
+              <p className="mt-2">
+                Goal:{' '}
+                <span className="font-semibold">{formatCurrency(draftSettings.targetNetMonth ?? 0)}</span>
+                /mo, or{' '}
+                <span className="font-semibold">{formatCurrency(planningConsistency.targetAnnualNet)}</span>
+                /yr after tax. Current hours, shift value, and vacation days point to about{' '}
+                <span className="font-semibold">{formatCurrency(planningConsistency.projectedAnnualNet)}</span>
+                /yr after estimated tax.
+              </p>
+              <p className="mt-2">
+                That is{' '}
+                <span className="font-semibold">
+                  {formatCurrency(Math.abs(planningConsistency.difference))}
+                </span>{' '}
+                {planningConsistency.difference < 0 ? 'below' : 'above'} your yearly net goal. Treat this as a planning estimate: missed days, sick days, and other unplanned time off can reduce the final amount further.
+              </p>
+              <p className="mt-2 text-xs text-rose-900/80">
+                Capacity uses{' '}
+                <span className="font-semibold">
+                  {formatHours(planningConsistency.plannedYearlyHours)}
+                </span>{' '}
+                planned yearly hours after{' '}
+                <span className="font-semibold">{plannedVacationDaysPerYear}</span> vacation days per year.
+              </p>
+            </div>
+          ) : null}
         </div>
         </section>
 
@@ -1017,9 +1350,29 @@ export function Configuration({
         >
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-foreground">Backfill month totals</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-semibold text-foreground">Backfill month totals</h2>
+              <InfoHelp
+                body={
+                  <>
+                    <p>{MONTH_TOTALS_PURPOSE_EXPLANATION}</p>
+                    <p className="font-semibold text-rose-700 underline">Note!</p>
+                    <p>
+                      * If a month already has{' '}
+                      <span className="font-semibold">daily entries</span>, those entries remain
+                      the source of truth for calculations.
+                    </p>
+                    <p>
+                      * For <span className="font-semibold">Business</span>{' '}
+                      {BUSINESS_MONTH_VAT_EXPLANATION}
+                    </p>
+                  </>
+                }
+                title="Backfill Month totals"
+              />
+            </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              Manual shortcuts for older months only. If a month has daily entries, those remain the source of truth.
+              Add all previously worked months to ensure proper tax calculations.
             </p>
           </div>
           <button
@@ -1068,12 +1421,48 @@ export function Configuration({
                   />
                 </label>
 
+                <div className="block">
+                  <span className="mb-2 block text-sm font-medium text-foreground">Month type</span>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      aria-pressed={summary.monthType === 'business'}
+                      className={`rounded-2xl border px-4 py-3 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                        summary.monthType === 'business'
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-border bg-background text-foreground'
+                      }`}
+                      disabled={isSaving}
+                      onClick={() => updateSummaryMonthType(index, 'business')}
+                      type="button"
+                    >
+                      Business
+                    </button>
+                    <button
+                      aria-pressed={summary.monthType === 'employment'}
+                      className={`rounded-2xl border px-4 py-3 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                        summary.monthType === 'employment'
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-border bg-background text-foreground'
+                      }`}
+                      disabled={isSaving}
+                      onClick={() => updateSummaryMonthType(index, 'employment')}
+                      type="button"
+                    >
+                      Employment / pre-business month
+                    </button>
+                  </div>
+                </div>
+
                 <label className="block">
                   <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                    <span>Hours</span>
+                    <span>Hours worked</span>
                     <InfoHelp
-                      body="Total worked hours for that older month. This helps yearly pace and time-based planning when you do not want to enter each day separately."
-                      title="Backfill hours"
+                      body={
+                        summary.monthType === 'employment'
+                          ? 'Optional hours worked for that employment / pre-business month.'
+                          : 'Total hours worked in that older business month. This helps the dashboard track yearly pace and compare your actual work time against your weekly and yearly planning, without needing daily entries for that month.'
+                      }
+                      title="Backfill hours worked"
                     />
                   </span>
                   <input
@@ -1086,91 +1475,162 @@ export function Configuration({
                     type="number"
                     min="0"
                     step="0.01"
-                    value={summary.hours}
-                    onFocus={selectPrefilledZero}
-                    onMouseUp={preservePrefilledZeroSelectionOnMouseUp}
-                    onTouchEnd={preservePrefilledZeroSelectionOnTouchEnd}
+                    value={summary.hours ?? ''}
+                    onClick={selectPrefilledZeroOnClick}
+                    onFocus={selectPrefilledZeroOnFocus}
                     onChange={(event) =>
-                      updateSummaryField(index, 'hours', parseNumber(event.target.value))
+                      updateSummaryField(
+                        index,
+                        'hours',
+                        summary.monthType === 'employment'
+                          ? parseOptionalNumber(event.target.value)
+                          : parseNumber(event.target.value),
+                      )
                     }
                   />
                 </label>
 
-                <label className="block">
-                  <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                    <span>Invoiced income</span>
-                    <InfoHelp
-                      body="The total amount you billed in that month. This feeds profit and tax forecasting. If daily entries exist for the same month, those entries still win."
-                      title="Backfill invoiced income"
-                    />
-                  </span>
-                  <input
-                    className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                      rowInvalidFields.invoicedIncome
-                        ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
-                        : 'border-border focus:border-primary'
-                    }`}
-                    disabled={isSaving}
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={summary.invoicedIncome}
-                    onFocus={selectPrefilledZero}
-                    onMouseUp={preservePrefilledZeroSelectionOnMouseUp}
-                    onTouchEnd={preservePrefilledZeroSelectionOnTouchEnd}
-                    onChange={(event) =>
-                      updateSummaryField(index, 'invoicedIncome', parseNumber(event.target.value))
-                    }
-                  />
-                </label>
+                {summary.monthType === 'employment' ? (
+                  <>
+                    <label className="block">
+                      <span className="mb-2 block text-sm font-medium text-foreground">Gross salary</span>
+                      <input
+                        className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                          rowInvalidFields.grossSalary
+                            ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
+                            : 'border-border focus:border-primary'
+                        }`}
+                        disabled={isSaving}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={summary.grossSalary ?? ''}
+                        onChange={(event) =>
+                          updateSummaryField(index, 'grossSalary', parseOptionalNumber(event.target.value))
+                        }
+                      />
+                    </label>
 
-                <label className="block">
-                  <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                    <span>Paid income</span>
-                    <InfoHelp
-                      body="The cash actually received in that month. Use this to keep cash-flow cards realistic for older months without entering each payment day."
-                      title="Backfill paid income"
-                    />
-                  </span>
-                  <input
-                    className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={isSaving}
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={summary.paidIncome}
-                    onFocus={selectPrefilledZero}
-                    onMouseUp={preservePrefilledZeroSelectionOnMouseUp}
-                    onTouchEnd={preservePrefilledZeroSelectionOnTouchEnd}
-                    onChange={(event) =>
-                      updateSummaryField(index, 'paidIncome', parseNumber(event.target.value))
-                    }
-                  />
-                </label>
+                    <label className="block">
+                      <span className="mb-2 block text-sm font-medium text-foreground">Net salary received</span>
+                      <input
+                        className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                          rowInvalidFields.netSalaryReceived
+                            ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
+                            : 'border-border focus:border-primary'
+                        }`}
+                        disabled={isSaving}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={summary.netSalaryReceived ?? ''}
+                        onChange={(event) =>
+                          updateSummaryField(index, 'netSalaryReceived', parseOptionalNumber(event.target.value))
+                        }
+                      />
+                    </label>
 
-                <label className="block">
-                  <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                    <span>Expenses</span>
-                    <InfoHelp
-                      body="Total business costs for that month. Expenses reduce profit and affect yearly forecast and tax planning for historical months."
-                      title="Backfill expenses"
-                    />
-                  </span>
-                  <input
-                    className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={isSaving}
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={summary.expenses}
-                    onFocus={selectPrefilledZero}
-                    onMouseUp={preservePrefilledZeroSelectionOnMouseUp}
-                    onTouchEnd={preservePrefilledZeroSelectionOnTouchEnd}
-                    onChange={(event) =>
-                      updateSummaryField(index, 'expenses', parseNumber(event.target.value))
-                    }
-                  />
-                </label>
+                    <label className="block">
+                      <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+                        <span>Tax already withheld</span>
+                        <InfoHelp
+                          body={TAX_ALREADY_WITHHELD_EXPLANATION}
+                          title="Tax already withheld"
+                        />
+                      </span>
+                      <input
+                        className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                          rowInvalidFields.taxAlreadyWithheld
+                            ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
+                            : 'border-border focus:border-primary'
+                        }`}
+                        disabled={isSaving}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={summary.taxAlreadyWithheld ?? ''}
+                        onChange={(event) =>
+                          updateSummaryField(index, 'taxAlreadyWithheld', parseOptionalNumber(event.target.value))
+                        }
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <label className="block">
+                      <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+                        <span>Invoiced amount (excl. VAT)</span>
+                        <InfoHelp
+                          body={`The total amount you billed in that older business month, excluding VAT. This is used for yearly progress, take-home projection, and tax planning. ${BEFORE_TAX_AMOUNT_EXPLANATION} If daily entries exist for the same month, those entries still win.`}
+                          title="Backfill invoiced amount"
+                        />
+                      </span>
+                      <input
+                        className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                          rowInvalidFields.invoicedIncome
+                            ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
+                            : 'border-border focus:border-primary'
+                        }`}
+                        disabled={isSaving}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={summary.invoicedIncome ?? ''}
+                        onClick={selectPrefilledZeroOnClick}
+                        onFocus={selectPrefilledZeroOnFocus}
+                        onChange={(event) =>
+                          updateSummaryField(index, 'invoicedIncome', parseOptionalNumber(event.target.value))
+                        }
+                      />
+                    </label>
+
+                    <label className="block">
+                      <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+                        <span>Paid amount received (excl. VAT)</span>
+                        <InfoHelp
+                          body={`The total amount you actually received in that older business month, excluding VAT. This helps the dashboard reflect cash received separately from what was invoiced.`}
+                          title="Backfill paid amount received"
+                        />
+                      </span>
+                      <input
+                        className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={isSaving}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={summary.paidIncome ?? ''}
+                        onClick={selectPrefilledZeroOnClick}
+                        onFocus={selectPrefilledZeroOnFocus}
+                        onChange={(event) =>
+                          updateSummaryField(index, 'paidIncome', parseOptionalNumber(event.target.value))
+                        }
+                      />
+                    </label>
+
+                    <label className="block">
+                      <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+                        <span>Business expenses (excl. VAT)</span>
+                        <InfoHelp
+                          body={`Total business expenses for that older business month, excluding VAT. These expenses reduce that month's before-tax amount and help the dashboard estimate your take-home projection and tax more accurately. ${BEFORE_TAX_AMOUNT_EXPLANATION}`}
+                          title="Backfill business expenses"
+                        />
+                      </span>
+                      <input
+                        className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={isSaving}
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={summary.expenses ?? ''}
+                        onClick={selectPrefilledZeroOnClick}
+                        onFocus={selectPrefilledZeroOnFocus}
+                        onChange={(event) =>
+                          updateSummaryField(index, 'expenses', parseOptionalNumber(event.target.value))
+                        }
+                      />
+                    </label>
+                  </>
+                )}
               </div>
 
               <button

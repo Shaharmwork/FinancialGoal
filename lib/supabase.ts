@@ -3,11 +3,56 @@ import type { AuthChangeEvent } from '@supabase/supabase-js'
 
 let browserClient: SupabaseClient | null | undefined
 const SESSION_TIMEOUT_MS = 2000
+const SUPABASE_AUTH_STORAGE_KEY_PREFIX = 'sb'
 
 export function hasSupabaseConfig() {
   return Boolean(
     process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   )
+}
+
+function getSupabaseAuthStorageKey() {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+
+  if (!supabaseUrl) {
+    return undefined
+  }
+
+  try {
+    const projectRef = new URL(supabaseUrl).hostname.split('.')[0]
+    return `${SUPABASE_AUTH_STORAGE_KEY_PREFIX}-${projectRef}-auth-token`
+  } catch {
+    return undefined
+  }
+}
+
+function isInvalidRefreshTokenError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  const message = error.message.toLowerCase()
+
+  return (
+    message.includes('invalid refresh token') ||
+    message.includes('refresh token not found') ||
+    message.includes('refresh token: refresh token not found')
+  )
+}
+
+function clearStoredSupabaseSession() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  const storageKey = getSupabaseAuthStorageKey()
+
+  if (!storageKey) {
+    return
+  }
+
+  window.localStorage.removeItem(storageKey)
+  window.localStorage.removeItem(`${storageKey}-code-verifier`)
 }
 
 export function getSupabaseClient() {
@@ -25,8 +70,9 @@ export function getSupabaseClient() {
     {
       auth: {
         autoRefreshToken: true,
-        persistSession: true,
         detectSessionInUrl: false,
+        persistSession: true,
+        storageKey: getSupabaseAuthStorageKey(),
       },
     },
   )
@@ -60,6 +106,14 @@ export async function getCurrentSession() {
       return data.session
     })
     .catch((error) => {
+      if (isInvalidRefreshTokenError(error)) {
+        console.warn(
+          '[Financial Goal] Supabase session had an invalid refresh token. Cleared local auth state.',
+        )
+        clearStoredSupabaseSession()
+        return null
+      }
+
       console.error('[Financial Goal] Supabase getSession failed.', error)
       return null
     })
@@ -99,6 +153,11 @@ export async function signOutFromSupabase() {
   const { error } = await supabase.auth.signOut()
 
   if (error) {
+    if (isInvalidRefreshTokenError(error)) {
+      clearStoredSupabaseSession()
+      return
+    }
+
     throw error
   }
 }

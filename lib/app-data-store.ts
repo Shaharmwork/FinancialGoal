@@ -27,6 +27,7 @@ interface AppSettingsRow {
   spouse_monthly_income?: number | null
   reserve_buffer_percent?: number | null
   qualifies_for_self_employed_deduction?: boolean | null
+  vacation_days_per_year?: number | null
   user_id?: string
 }
 
@@ -49,10 +50,14 @@ interface DailyEntryRow {
 
 interface MonthlySummaryRow {
   month_key: string
-  hours: number
-  invoiced_income: number
-  paid_income: number
-  expenses: number
+  month_type?: string | null
+  hours: number | null
+  invoiced_income: number | null
+  paid_income: number | null
+  expenses: number | null
+  gross_salary?: number | null
+  net_salary_received?: number | null
+  tax_already_withheld?: number | null
   user_id?: string | null
 }
 
@@ -87,6 +92,7 @@ function mapSettingsFromRow(row: AppSettingsRow | null): Settings {
     reserveBufferPercent: row.reserve_buffer_percent,
     spouseMonthlyIncome: row.spouse_monthly_income,
     targetNetMonth: row.target_net_month,
+    vacationDaysPerYear: row.vacation_days_per_year,
     weeklyHoursTarget: row.weekly_hours_target,
   })
 }
@@ -100,6 +106,7 @@ function mapSettingsToRow(settings: Settings, userId: string) {
     reserve_buffer_percent: settings.reserveBufferPercent,
     spouse_monthly_income: settings.spouseMonthlyIncome,
     target_net_month: settings.targetNetMonth,
+    vacation_days_per_year: settings.vacationDaysPerYear,
     weekly_hours_target: settings.weeklyHoursTarget,
   }
 }
@@ -149,20 +156,28 @@ function mapEntryToRow(entry: DailyEntry, userId: string) {
 function mapMonthlySummaryFromRow(row: MonthlySummaryRow): MonthlySummary | null {
   return normalizeMonthlySummary({
     expenses: row.expenses,
+    grossSalary: row.gross_salary,
     hours: row.hours,
     invoicedIncome: row.invoiced_income,
+    monthType: row.month_type,
     monthKey: row.month_key,
+    netSalaryReceived: row.net_salary_received,
     paidIncome: row.paid_income,
+    taxAlreadyWithheld: row.tax_already_withheld,
   })
 }
 
 function mapMonthlySummaryToRow(summary: MonthlySummary, userId: string) {
   return {
     expenses: summary.expenses,
+    gross_salary: summary.grossSalary,
     hours: summary.hours,
     invoiced_income: summary.invoicedIncome,
     month_key: summary.monthKey,
+    month_type: summary.monthType,
+    net_salary_received: summary.netSalaryReceived,
     paid_income: summary.paidIncome,
+    tax_already_withheld: summary.taxAlreadyWithheld,
     user_id: userId,
   }
 }

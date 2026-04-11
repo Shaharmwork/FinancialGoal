@@ -7,7 +7,7 @@ import {
   getUserReportDayFormDrafts,
   updateUserReportDayFormDrafts,
 } from '@/lib/ui-preferences'
-import type { DailyEntry, Settings } from '@/lib/types'
+import type { DailyEntry, MonthlySummary, Settings } from '@/lib/types'
 import {
   getCurrentMonthRange,
   getEarliestMissingCurrentMonthWeekday,
@@ -22,6 +22,7 @@ interface DailyLogProps {
   entries: DailyEntry[]
   fillMissingDaysRequest?: number
   hasUnsavedChanges?: boolean
+  monthlySummaries: MonthlySummary[]
   onDeleteSavedEntryImmediately: (dateKey: string) => void
   onRemoveEntryForDate: (dateKey: string) => void
   onSaveEntries: (nextEntries?: DailyEntry[]) => boolean | void
@@ -192,7 +193,7 @@ function getDefaultDateForMonth(monthKey: string, today: Date) {
 }
 
 function getEntryDraft(entry: DailyEntry | undefined): DayInputDraft {
-  if (!entry || entry.dayStatus === 'no_work') {
+  if (!entry || entry.dayStatus === 'no_work' || entry.dayStatus === 'vacation') {
     return {
       expenses: '',
       hours: '',
@@ -293,6 +294,7 @@ export function DailyLog({
   entries,
   fillMissingDaysRequest = 0,
   hasUnsavedChanges = false,
+  monthlySummaries,
   onDeleteSavedEntryImmediately,
   onRemoveEntryForDate,
   onSaveEntries,
@@ -341,6 +343,19 @@ export function DailyLog({
     () => new Set(entries.filter((entry) => entry.dayStatus === 'no_work').map((entry) => entry.date)),
     [entries],
   )
+  const vacationDateKeys = useMemo(
+    () => new Set(entries.filter((entry) => entry.dayStatus === 'vacation').map((entry) => entry.date)),
+    [entries],
+  )
+  const employmentMonthKeys = useMemo(
+    () =>
+      new Set(
+        monthlySummaries
+          .filter((summary) => summary.monthType === 'employment')
+          .map((summary) => summary.monthKey),
+      ),
+    [monthlySummaries],
+  )
   const savedEntryDateKeys = useMemo(
     () => new Set(savedEntries.map((entry) => entry.date)),
     [savedEntries],
@@ -368,6 +383,8 @@ export function DailyLog({
   )
   const selectedDraft = dayInputDrafts[date]
   const isSelectedDayMarkedNoWork = selectedEntry?.dayStatus === 'no_work'
+  const isSelectedDayMarkedVacation = selectedEntry?.dayStatus === 'vacation'
+  const isSelectedMonthEmployment = employmentMonthKeys.has(date.slice(0, 7))
   const selectedEntryDraft = getEntryDraft(selectedEntry)
   const selectedWorkedHours = selectedEntryDraft.hours
   const selectedWorkedInvoicedIncome = selectedEntryDraft.invoicedIncome
@@ -376,6 +393,8 @@ export function DailyLog({
   const currentInvalidFields = invalidFieldsByDate[date] ?? {}
   const hasPendingSelectedDayChanges =
     !isSelectedDayMarkedNoWork &&
+    !isSelectedDayMarkedVacation &&
+    !isSelectedMonthEmployment &&
     !!selectedDraft &&
     (hours !== selectedWorkedHours ||
       invoicedIncome !== selectedWorkedInvoicedIncome ||
@@ -469,6 +488,14 @@ export function DailyLog({
     value: string,
     invalidField?: keyof InvalidDailyFieldsState,
   ) => {
+    if (isSelectedMonthEmployment) {
+      setValidationIssue({
+        title: 'Non-business month',
+        body: 'This month is marked as a non-business month. Adding daily business entries here would make your calculations inaccurate.',
+      })
+      return
+    }
+
     setDayInputDrafts((currentValue) => {
       const existingDraft = currentValue[date] ?? getEntryDraft(selectedEntry)
       const nextDraft = {
@@ -539,6 +566,18 @@ export function DailyLog({
     let nextEntriesToSave = entries
     const nextInvalidFieldsByDate: InvalidDailyFieldsByDate = {}
     const softWarnings: DailySoftWarning[] = []
+    const employmentDraftDateKey = Object.keys(dayInputDrafts).find((draftDateKey) =>
+      employmentMonthKeys.has(draftDateKey.slice(0, 7)),
+    )
+
+    if (employmentDraftDateKey) {
+      setValidationIssue({
+        title: 'Non-business month',
+        body: 'This month is marked as a non-business month. Adding daily business entries here would make your calculations inaccurate.',
+      })
+      syncSelectedDate(employmentDraftDateKey, true)
+      return
+    }
 
     Object.entries(dayInputDrafts).forEach(([draftDateKey, draft]) => {
       const draftSaveState = getDailyDraftSaveState(draft, settings)
@@ -563,7 +602,10 @@ export function DailyLog({
       }
 
       const existingEntry = entries.find((entry) => entry.date === draftDateKey)
-      if (existingEntry?.dayStatus === 'no_work' && isDraftEmpty(draft)) {
+      if (
+        (existingEntry?.dayStatus === 'no_work' || existingEntry?.dayStatus === 'vacation') &&
+        isDraftEmpty(draft)
+      ) {
         return
       }
       const nextEntry: DailyEntry = {
@@ -616,6 +658,14 @@ export function DailyLog({
   }
 
   const handleMarkNoWork = () => {
+    if (isSelectedMonthEmployment) {
+      setValidationIssue({
+        title: 'Non-business month',
+        body: 'This month is marked as a non-business month. Adding daily business entries here would make your calculations inaccurate.',
+      })
+      return
+    }
+
     onUpsertEntry({
       id: selectedEntry?.id ?? `entry-${date}-no-work`,
       date,
@@ -659,6 +709,60 @@ export function DailyLog({
       return nextValue
     })
     setFormMessage('No work mark removed. Save daily reports to keep all changes.')
+  }
+
+  const handleMarkVacation = () => {
+    if (isSelectedMonthEmployment) {
+      setValidationIssue({
+        title: 'Non-business month',
+        body: 'This month is marked as a non-business month. Adding daily business entries here would make your calculations inaccurate.',
+      })
+      return
+    }
+
+    onUpsertEntry({
+      id: selectedEntry?.id ?? `entry-${date}-vacation`,
+      date,
+      dayStatus: 'vacation' as const,
+      hours: 0,
+      invoicedIncome: 0,
+      paidIncome: 0,
+      expenses: 0,
+    })
+    setHours('')
+    setInvoicedIncome('')
+    setPaidIncome('')
+    setExpenses('')
+    setDayInputDrafts((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[date]
+      return nextValue
+    })
+    setInvalidFieldsByDate((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[date]
+      return nextValue
+    })
+    setFormMessage('Marked as vacation. Save daily reports to keep all changes.')
+  }
+
+  const handleRemoveVacationMark = () => {
+    onRemoveEntryForDate(date)
+    setHours('')
+    setInvoicedIncome('')
+    setPaidIncome('')
+    setExpenses('')
+    setDayInputDrafts((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[date]
+      return nextValue
+    })
+    setInvalidFieldsByDate((currentValue) => {
+      const nextValue = { ...currentValue }
+      delete nextValue[date]
+      return nextValue
+    })
+    setFormMessage('Vacation mark removed. Save daily reports to keep all changes.')
   }
 
   const handleRequestDeleteEntry = (entry: DailyEntry) => {
@@ -755,14 +859,33 @@ export function DailyLog({
               >
                 Remove no work mark
               </button>
-            ) : (
+            ) : isSelectedDayMarkedVacation ? (
               <button
-                className="rounded-2xl bg-sky-100 px-4 py-3 text-sm font-semibold text-sky-800 transition hover:bg-sky-200"
-                onClick={handleMarkNoWork}
+                className="rounded-2xl bg-amber-100 px-4 py-3 text-sm font-semibold text-amber-800 transition hover:bg-amber-200"
+                onClick={handleRemoveVacationMark}
                 type="button"
               >
-                Mark as no work
+                Remove vacation mark
               </button>
+            ) : (
+              <>
+                <button
+                  className="rounded-2xl bg-sky-100 px-4 py-3 text-sm font-semibold text-sky-800 transition hover:bg-sky-200 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={isSelectedMonthEmployment}
+                  onClick={handleMarkNoWork}
+                  type="button"
+                >
+                  Mark as no work
+                </button>
+                <button
+                  className="rounded-2xl bg-amber-100 px-4 py-3 text-sm font-semibold text-amber-800 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={isSelectedMonthEmployment}
+                  onClick={handleMarkVacation}
+                  type="button"
+                >
+                  Mark as vacation
+                </button>
+              </>
             )}
           </div>
 
@@ -802,6 +925,7 @@ export function DailyLog({
                         const isToday = day.key === todayDateKey
                         const isFilled = filledDateKeys.has(day.key)
                         const isNoWork = noWorkDateKeys.has(day.key)
+                        const isVacation = vacationDateKeys.has(day.key)
                         const isMissing =
                           day.key.slice(0, 7) === currentMonthKey &&
                           day.isCurrentMonth &&
@@ -821,6 +945,8 @@ export function DailyLog({
                                     ? 'border-transparent bg-slate-100 text-slate-500'
                                     : isNoWork
                                       ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                      : isVacation
+                                        ? 'border-amber-200 bg-amber-50 text-amber-800'
                                       : isFilled
                                         ? 'border-emerald-200 bg-emerald-100 text-emerald-900'
                                         : isMissing
@@ -870,6 +996,7 @@ export function DailyLog({
                     const isToday = day.key === todayDateKey
                     const isFilled = filledDateKeys.has(day.key)
                     const isNoWork = noWorkDateKeys.has(day.key)
+                    const isVacation = vacationDateKeys.has(day.key)
                     const isMissing =
                       day.key.slice(0, 7) === currentMonthKey &&
                       !day.isWeekend &&
@@ -886,6 +1013,8 @@ export function DailyLog({
                               ? 'border-transparent bg-slate-100 text-slate-500'
                               : isNoWork
                                 ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                : isVacation
+                                  ? 'border-amber-200 bg-amber-50 text-amber-800'
                                 : isFilled
                                   ? 'border-emerald-200 bg-emerald-100 text-emerald-900'
                                   : isMissing
@@ -902,7 +1031,7 @@ export function DailyLog({
                         {isFilled && !isSelected ? (
                           <span
                             className={`absolute bottom-2 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full ${
-                              isNoWork ? 'bg-sky-500' : 'bg-emerald-600'
+                              isNoWork ? 'bg-sky-500' : isVacation ? 'bg-amber-500' : 'bg-emerald-600'
                             }`}
                           />
                         ) : null}
@@ -949,7 +1078,7 @@ export function DailyLog({
                   ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
                   : 'border-border focus:border-primary'
               }`}
-              disabled={isSelectedDayMarkedNoWork}
+              disabled={isSelectedDayMarkedNoWork || isSelectedDayMarkedVacation || isSelectedMonthEmployment}
               type="number"
               min="0"
               step="0.25"
@@ -970,7 +1099,7 @@ export function DailyLog({
                   ? 'border-rose-300 bg-rose-50/50 focus:border-rose-500'
                   : 'border-border focus:border-primary'
               }`}
-              disabled={isSelectedDayMarkedNoWork}
+              disabled={isSelectedDayMarkedNoWork || isSelectedDayMarkedVacation || isSelectedMonthEmployment}
               type="number"
               min="0"
               step="0.01"
@@ -992,7 +1121,7 @@ export function DailyLog({
             <span className="mb-2 block text-sm font-medium text-foreground">Paid income</span>
             <input
               className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary"
-              disabled={isSelectedDayMarkedNoWork}
+              disabled={isSelectedDayMarkedNoWork || isSelectedDayMarkedVacation || isSelectedMonthEmployment}
               type="number"
               min="0"
               step="0.01"
@@ -1012,7 +1141,7 @@ export function DailyLog({
             <span className="mb-2 block text-sm font-medium text-foreground">Expenses</span>
             <input
               className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary"
-              disabled={isSelectedDayMarkedNoWork}
+              disabled={isSelectedDayMarkedNoWork || isSelectedDayMarkedVacation || isSelectedMonthEmployment}
               type="number"
               min="0"
               step="0.01"
@@ -1026,8 +1155,12 @@ export function DailyLog({
           </label>
 
           <div className="rounded-2xl bg-muted px-4 py-3 text-sm text-muted-foreground">
-            {isSelectedDayMarkedNoWork ? (
+            {isSelectedMonthEmployment ? (
+              'This month is marked as an employment / pre-business month. Daily reports are disabled for this month so calculations stay accurate.'
+            ) : isSelectedDayMarkedNoWork ? (
               'This day is marked as no work. It counts as handled for completeness and is not treated as missing.'
+            ) : isSelectedDayMarkedVacation ? (
+              'This day is marked as vacation. It counts as handled for completeness and is tracked separately from no-work days.'
             ) : hasConfiguredInvoiceDefaults ? (
               <>
                 Default invoice amount right now is{' '}
@@ -1084,6 +1217,8 @@ export function DailyLog({
                       <p className="text-sm font-semibold text-foreground">{formatDate(entryDate)}</p>
                       {entry.dayStatus === 'no_work' ? (
                         <p className="mt-1 text-sm font-medium text-sky-700">No work</p>
+                      ) : entry.dayStatus === 'vacation' ? (
+                        <p className="mt-1 text-sm font-medium text-amber-700">Vacation</p>
                       ) : (
                         <>
                           <p className="mt-1 text-sm text-muted-foreground">{formatHours(entry.hours)}</p>
@@ -1095,7 +1230,7 @@ export function DailyLog({
                           </p>
                         </>
                       )}
-                      {entry.dayStatus !== 'no_work' && entry.expenses > 0 ? (
+                      {entry.dayStatus === 'worked' && entry.expenses > 0 ? (
                         <p className="mt-1 text-sm text-muted-foreground">
                           Expenses: {formatCurrencyPrecise(entry.expenses)}
                         </p>
@@ -1114,6 +1249,10 @@ export function DailyLog({
                       {entry.dayStatus === 'no_work' ? (
                         <span className="rounded-full bg-sky-100 px-3 py-1 text-xs font-medium text-sky-700">
                           Handled
+                        </span>
+                      ) : entry.dayStatus === 'vacation' ? (
+                        <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-700">
+                          Vacation
                         </span>
                       ) : (
                         <>

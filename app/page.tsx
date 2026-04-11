@@ -1,8 +1,11 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
-import { Configuration as ConfigurationScreen } from '@/components/configuration'
+import {
+  Configuration as ConfigurationScreen,
+  type ConfigurationNavigationHandlers,
+} from '@/components/configuration'
 import { DailyLog } from '@/components/daily-log'
 import { Dashboard } from '@/components/dashboard'
 import { LoginForm } from '@/components/login-form'
@@ -92,13 +95,31 @@ function getNewSummaryConflictMonthKeys(
   nextEntries: DailyEntry[],
   monthlySummaries: MonthlySummary[],
 ) {
-  const summaryMonthKeys = new Set(monthlySummaries.map((summary) => summary.monthKey))
+  const summaryMonthKeys = new Set(
+    monthlySummaries
+      .filter((summary) => summary.monthType === 'business')
+      .map((summary) => summary.monthKey),
+  )
   const savedEntryMonthKeys = new Set(savedEntries.map((entry) => entry.date.slice(0, 7)))
   const nextEntryMonthKeys = new Set(nextEntries.map((entry) => entry.date.slice(0, 7)))
 
   return [...summaryMonthKeys].filter(
     (monthKey) => nextEntryMonthKeys.has(monthKey) && !savedEntryMonthKeys.has(monthKey),
   )
+}
+
+function getEmploymentSummaryConflictMonthKeys(
+  nextEntries: DailyEntry[],
+  monthlySummaries: MonthlySummary[],
+) {
+  const employmentMonthKeys = new Set(
+    monthlySummaries
+      .filter((summary) => summary.monthType === 'employment')
+      .map((summary) => summary.monthKey),
+  )
+  const nextEntryMonthKeys = new Set(nextEntries.map((entry) => entry.date.slice(0, 7)))
+
+  return [...employmentMonthKeys].filter((monthKey) => nextEntryMonthKeys.has(monthKey))
 }
 
 export default function Home() {
@@ -123,7 +144,9 @@ export default function Home() {
   const [isSigningIn, setIsSigningIn] = useState(false)
   const [isSigningOut, setIsSigningOut] = useState(false)
   const [isUnsavedReportModalOpen, setIsUnsavedReportModalOpen] = useState(false)
+  const [isUnsavedConfigurationModalOpen, setIsUnsavedConfigurationModalOpen] = useState(false)
   const [isSummaryConflictWarningOpen, setIsSummaryConflictWarningOpen] = useState(false)
+  const [isEmploymentMonthWarningOpen, setIsEmploymentMonthWarningOpen] = useState(false)
   const [isFutureReportWarningOpen, setIsFutureReportWarningOpen] = useState(false)
   const [pendingSummaryConflictSaveEntries, setPendingSummaryConflictSaveEntries] = useState<
     DailyEntry[] | null
@@ -132,6 +155,8 @@ export default function Home() {
   const [pendingScreen, setPendingScreen] = useState<Screen | null>(null)
   const [toastErrorMessage, setToastErrorMessage] = useState('')
   const [hasHydratedReportDraftEntries, setHasHydratedReportDraftEntries] = useState(false)
+  const [hasUnsavedConfigurationChanges, setHasUnsavedConfigurationChanges] = useState(false)
+  const configurationNavigationHandlersRef = useRef<ConfigurationNavigationHandlers | null>(null)
   const hasUnsavedReportChanges =
     reportDraftEntries !== null && !areEntriesEqual(reportDraftEntries, entries)
 
@@ -408,6 +433,11 @@ export default function Home() {
       return true
     }
 
+    if (getEmploymentSummaryConflictMonthKeys(entriesToSave, monthlySummaries).length > 0) {
+      setIsEmploymentMonthWarningOpen(true)
+      return false
+    }
+
     if (getNewSummaryConflictMonthKeys(entries, entriesToSave, monthlySummaries).length > 0) {
       setPendingSummaryConflictSaveEntries(cloneEntries(entriesToSave))
       setIsSummaryConflictWarningOpen(true)
@@ -427,6 +457,13 @@ export default function Home() {
     }
   }
 
+  const handleRegisterConfigurationNavigationHandlers = useCallback(
+    (handlers: ConfigurationNavigationHandlers | null) => {
+      configurationNavigationHandlersRef.current = handlers
+    },
+    [],
+  )
+
   const handleScreenChange = (screen: Screen) => {
     if (screen === currentScreen) {
       return
@@ -435,6 +472,16 @@ export default function Home() {
     if (currentScreen === 'daily-log' && screen !== 'daily-log' && hasUnsavedReportChanges) {
       setPendingScreen(screen)
       setIsUnsavedReportModalOpen(true)
+      return
+    }
+
+    if (
+      currentScreen === 'configuration' &&
+      screen !== 'configuration' &&
+      hasUnsavedConfigurationChanges
+    ) {
+      setPendingScreen(screen)
+      setIsUnsavedConfigurationModalOpen(true)
       return
     }
 
@@ -488,6 +535,19 @@ export default function Home() {
       throw error
     }
   }, [])
+
+  const handleDeleteSavedMonthSummary = useCallback(async (monthKey: string) => {
+    const nextMonthlySummaries = monthlySummaries.filter((summary) => summary.monthKey !== monthKey)
+
+    try {
+      await saveMonthlySummariesToSupabase(nextMonthlySummaries)
+      setMonthlySummaries(nextMonthlySummaries)
+    } catch (error) {
+      console.error('[Financial Goal] Failed to delete saved month summary.', error)
+      setToastErrorMessage(getErrorMessage(error, 'Failed to delete saved month summary.'))
+      throw error
+    }
+  }, [monthlySummaries])
   const handleSignIn = async (email: string, password: string) => {
     if (!hasSupabaseConfig()) {
       setToastErrorMessage(
@@ -559,6 +619,7 @@ export default function Home() {
         reportResetRequest={reportResetRequest}
         savedEntries={entries}
         settings={settings}
+        monthlySummaries={monthlySummaries}
         onUpsertEntry={handleUpsertEntry}
         userId={session?.user?.id}
       />
@@ -570,8 +631,12 @@ export default function Home() {
         entries={entries}
         settingsFocusRequest={settingsFocusRequest}
         monthlySummaries={monthlySummaries}
+        onRegisterNavigationHandlers={handleRegisterConfigurationNavigationHandlers}
         onSaveConfiguration={handleSaveConfiguration}
+        onDeleteSavedMonthSummary={handleDeleteSavedMonthSummary}
+        onUnsavedChangesChange={setHasUnsavedConfigurationChanges}
         settings={settings}
+        userId={session?.user?.id}
       />
     )
   }
@@ -710,6 +775,65 @@ export default function Home() {
         primaryActionLabel="Save"
         secondaryActionLabel="Don't Save"
         title="Unsaved daily reports"
+      />
+      <WarningModal
+        body="There are unsaved changes, do you want to save them or discard and leave"
+        isOpen={isUnsavedConfigurationModalOpen}
+        onClose={() => {
+          setIsUnsavedConfigurationModalOpen(false)
+          setPendingScreen(null)
+        }}
+        onPrimaryAction={async () => {
+          const wasSaved = await configurationNavigationHandlersRef.current?.save()
+
+          if (!wasSaved) {
+            setIsUnsavedConfigurationModalOpen(false)
+            setPendingScreen(null)
+            return
+          }
+
+          setIsUnsavedConfigurationModalOpen(false)
+          setHasUnsavedConfigurationChanges(false)
+
+          if (pendingScreen) {
+            proceedToScreen(pendingScreen)
+            setPendingScreen(null)
+          }
+        }}
+        onSecondaryAction={() => {
+          configurationNavigationHandlersRef.current?.discard()
+          setHasUnsavedConfigurationChanges(false)
+          setIsUnsavedConfigurationModalOpen(false)
+
+          if (pendingScreen) {
+            proceedToScreen(pendingScreen)
+            setPendingScreen(null)
+          }
+        }}
+        primaryActionLabel="Save"
+        secondaryActionLabel="Discard"
+        title="Unsaved configuration changes"
+      />
+      <WarningModal
+        body="This month is marked as a non-business month. Adding daily business entries here would make your calculations inaccurate."
+        isOpen={isEmploymentMonthWarningOpen}
+        onClose={() => {
+          setIsEmploymentMonthWarningOpen(false)
+          setPendingScreen(null)
+        }}
+        onPrimaryAction={() => {
+          setIsEmploymentMonthWarningOpen(false)
+          setBackfillFocusRequest((currentValue) => currentValue + 1)
+          proceedToScreen('configuration')
+          setPendingScreen(null)
+        }}
+        onSecondaryAction={() => {
+          setIsEmploymentMonthWarningOpen(false)
+          setPendingScreen(null)
+        }}
+        primaryActionLabel="Go to month setup"
+        secondaryActionLabel="Close"
+        title="Non-business month"
       />
       <WarningModal
         body="Adding a daily entry here will make daily entries the source of truth for this month. Your monthly summary will no longer be used for calculations unless all daily entries for that month are removed. This may change your dashboard forecasts and tax planning."
