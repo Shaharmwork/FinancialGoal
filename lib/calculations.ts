@@ -387,7 +387,7 @@ function projectFromPaceOrZero(actualValue: number, progress: number) {
   return actualValue > 0 ? actualValue / progress : 0
 }
 
-function getGoalAnnualBusinessProfit(settings: Settings) {
+function getRequiredAnnualBeforeTaxAmount(settings: Settings) {
   return estimateRequiredAnnualBusinessProfitForTargetNet2026({
     targetAnnualNet: getTargetNetMonth(settings) * 12,
     qualifiesForSelfEmployedDeduction: getSelfEmployedDeductionFlag(settings),
@@ -697,7 +697,7 @@ export interface MonthStats {
 }
 
 export interface YearStats {
-  goalAnnualBusinessProfit: number
+  requiredAnnualBeforeTaxAmount: number
   goalAnnualNet: number
   ytdInvoicedIncome: number
   ytdPaidIncome: number
@@ -755,7 +755,7 @@ export function getCurrentYearStats(
   const annualReserveModel = getAnnualReserveModel(yearToDateTotals, yearProgress, settings)
 
   return {
-    goalAnnualBusinessProfit: getGoalAnnualBusinessProfit(settings),
+    requiredAnnualBeforeTaxAmount: getRequiredAnnualBeforeTaxAmount(settings),
     goalAnnualNet: roundCurrency(getTargetNetMonth(settings) * 12),
     ytdInvoicedIncome: roundCurrency(yearToDateTotals.business.invoicedIncome),
     ytdPaidIncome: roundCurrency(yearToDateTotals.business.paidIncome),

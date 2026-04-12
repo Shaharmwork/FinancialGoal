@@ -51,7 +51,7 @@ export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit }: Logi
           </div>
         ) : null}
 
-        <form className="mt-4 space-y-4" onSubmit={handleSubmit}>
+        <form className="mt-4 space-y-4" onSubmit={handleSubmit} suppressHydrationWarning>
           <label className="block">
             <span className="mb-2 block text-sm font-medium text-foreground">Email</span>
             <input
@@ -59,6 +59,7 @@ export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit }: Logi
               className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary"
               disabled={!isConfigured || isBusy}
               onChange={(event) => setEmail(event.target.value)}
+              suppressHydrationWarning
               type="email"
               value={email}
             />
@@ -75,6 +76,7 @@ export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit }: Logi
                 className="min-w-0 flex-1 rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary"
                 disabled={!isConfigured || isBusy}
                 onChange={(event) => setPassword(event.target.value)}
+                suppressHydrationWarning
                 type={showPassword ? 'text' : 'password'}
                 value={password}
               />
