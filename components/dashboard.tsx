@@ -41,7 +41,7 @@ export function Dashboard({
   const year = getCurrentYearStats(entries, monthlySummaries, settings)
   const projectedTakeHome = year.projectedAnnualNet
   const yearlyNetGoal = settings.targetNetMonth ? settings.targetNetMonth * 12 : 0
-  const beforeTaxTarget = year.goalAnnualBusinessProfit
+  const beforeTaxTarget = year.requiredAnnualBeforeTaxAmount
   const greeting = getGreeting(now, displayName)
   const hasBusinessHistory = entries.length > 0 || monthlySummaries.length > 0
   const setupCompleteness = getSetupCompleteness(settings, monthlySummaries, now)
@@ -486,28 +486,3 @@ function getEffortLabel(neededMonthlyAverage: number, projectedProfit: number | 
   return 'Heavy lift'
 }
 
-function getRecommendation({
-  amountAhead,
-  gapToGoal,
-  monthsRemaining,
-  neededMonthlyAverage,
-  projectedProfit,
-  goal,
-}: {
-  amountAhead: number | undefined
-  gapToGoal: number | undefined
-  monthsRemaining: number
-  neededMonthlyAverage: number
-  projectedProfit: number | undefined
-  goal: number
-}) {
-  if (projectedProfit === undefined) {
-    return 'Projection starts after your first real entries.'
-  }
-
-  if (projectedProfit >= goal) {
-    return `About ${formatCurrency(amountAhead ?? 0)} ahead. Keep the pace steady.`
-  }
-
-  return `Need about ${formatCurrency(neededMonthlyAverage)} more before-tax income per month for the next ${monthsRemaining} months.`
-}

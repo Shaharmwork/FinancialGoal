@@ -78,6 +78,7 @@ interface MonthSummaryValidationIssue {
 interface PendingDeleteMonthSummary {
   index: number
   monthKey: string
+  summary: MonthlySummary
 }
 
 type SummaryFieldKey =
@@ -109,7 +110,7 @@ const BUSINESS_MONTH_VAT_EXPLANATION =
 const BEFORE_TAX_AMOUNT_EXPLANATION =
   "Invoiced amount (excl. VAT) minus Business expenses (excl. VAT) gives that month's before-tax amount."
 const MONTH_TOTALS_PURPOSE_EXPLANATION =
-  'Use this section to add older business or employment / pre-business months to avoid the need to add each of their working day manually. These month totals help the app calculate your yearly pace, target progress, and tax planning more accurately.'
+  'Use this section to add older business or employment / pre-business months and avoid the need to add each working day manually. These month totals help the app calculate your yearly pace, target progress, and tax planning more accurately.'
 const BUSINESS_MONTH_TOTALS_USAGE_EXPLANATION =
   'If a month already has daily entries, those entries remain the source of truth for calculations.'
 const TAX_ALREADY_WITHHELD_EXPLANATION =
@@ -958,6 +959,7 @@ export function Configuration({
     setPendingDeleteMonthSummary({
       index,
       monthKey: summary.monthKey,
+      summary,
     })
   }
 
@@ -1003,7 +1005,7 @@ export function Configuration({
       // Restore the deleted summary back into draft state and re-sort
       const restored = sortMonthlySummariesNewestFirst([
         ...nextSummaries,
-        sortedDraftSummaries[summaryToDelete.index],
+        summaryToDelete.summary,
       ])
       setDraftMonthlySummaries(restored)
       refreshInvalidSummaryFieldsIfVisible(restored)
@@ -1316,28 +1318,26 @@ export function Configuration({
             <div className="rounded-[1.35rem] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-950">
               <p className="font-semibold">Planning check</p>
               <p className="mt-2">
-                Goal:{' '}
+                Your goal is{' '}
                 <span className="font-semibold">{formatCurrency(draftSettings.targetNetMonth ?? 0)}</span>
                 /mo, or{' '}
                 <span className="font-semibold">{formatCurrency(planningConsistency.targetAnnualNet)}</span>
-                /yr after tax. Current hours, shift value, and vacation days point to about{' '}
+                /yr after tax.
+              </p>
+              <p className="mt-2">
+                Your current hours/rate setup points to about{' '}
                 <span className="font-semibold">{formatCurrency(planningConsistency.projectedAnnualNet)}</span>
                 /yr after estimated tax.
               </p>
-              <p className="mt-2">
-                That is{' '}
+              <p className="mt-2 text-xs text-rose-900/80">
+                So keep in mind that it is{' '}
                 <span className="font-semibold">
                   {formatCurrency(Math.abs(planningConsistency.difference))}
                 </span>{' '}
-                {planningConsistency.difference < 0 ? 'below' : 'above'} your yearly net goal. Treat this as a planning estimate: missed days, sick days, and other unplanned time off can reduce the final amount further.
-              </p>
-              <p className="mt-2 text-xs text-rose-900/80">
-                Capacity uses{' '}
-                <span className="font-semibold">
-                  {formatHours(planningConsistency.plannedYearlyHours)}
-                </span>{' '}
-                planned yearly hours after{' '}
-                <span className="font-semibold">{plannedVacationDaysPerYear}</span> vacation days per year.
+                {planningConsistency.difference < 0 ? 'below' : 'above'} your yearly net goal, based on{' '}
+                <span className="font-semibold">{formatHours(planningConsistency.plannedYearlyHours)}</span>{' '}
+                planned hours/yr and{' '}
+                <span className="font-semibold">{plannedVacationDaysPerYear}</span> vacation days.
               </p>
             </div>
           ) : null}
@@ -1372,7 +1372,7 @@ export function Configuration({
               />
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              Add all previously worked months to ensure proper tax calculations.
+              Add older months to improve yearly progress and tax accuracy.
             </p>
           </div>
           <button
@@ -1493,7 +1493,13 @@ export function Configuration({
                 {summary.monthType === 'employment' ? (
                   <>
                     <label className="block">
-                      <span className="mb-2 block text-sm font-medium text-foreground">Gross salary</span>
+                      <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+                        <span>Gross salary</span>
+                        <InfoHelp
+                          body="Total salary for that month before tax and other deductions."
+                          title="Gross salary"
+                        />
+                      </span>
                       <input
                         className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
                           rowInvalidFields.grossSalary
@@ -1512,7 +1518,13 @@ export function Configuration({
                     </label>
 
                     <label className="block">
-                      <span className="mb-2 block text-sm font-medium text-foreground">Net salary received</span>
+                      <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+                        <span>Net salary received</span>
+                        <InfoHelp
+                          body="What actually paid into your bank account."
+                          title="Net salary received"
+                        />
+                      </span>
                       <input
                         className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
                           rowInvalidFields.netSalaryReceived
