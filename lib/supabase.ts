@@ -133,7 +133,7 @@ export async function signInWithEmailPassword(email: string, password: string) {
     throw new Error('Supabase is not configured.')
   }
 
-  const { error } = await supabase.auth.signInWithPassword({
+  const { data, error } = await supabase.auth.signInWithPassword({
     email,
     password,
   })
@@ -141,6 +141,8 @@ export async function signInWithEmailPassword(email: string, password: string) {
   if (error) {
     throw error
   }
+
+  return data
 }
 
 export async function signOutFromSupabase() {

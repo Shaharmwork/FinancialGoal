@@ -1,93 +1,88 @@
-'use client'
+"use client";
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Session } from '@supabase/supabase-js'
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import {
   Configuration as ConfigurationScreen,
   type ConfigurationNavigationHandlers,
-} from '@/components/configuration'
-import { DailyLog } from '@/components/daily-log'
-import { Dashboard } from '@/components/dashboard'
-import { LoginForm } from '@/components/login-form'
-import { WarningModal } from '@/components/warning-modal'
+} from "@/components/configuration";
+import {
+  DailyLog,
+  type DailyLogNavigationHandlers,
+} from "@/components/daily-log";
+import { Dashboard } from "@/components/dashboard";
+import { LoginForm } from "@/components/login-form";
+import { WarningModal } from "@/components/warning-modal";
 import {
   loadRemoteAppData,
   saveDailyEntriesToSupabase,
   saveMonthlySummariesToSupabase,
   saveSettingsToSupabase,
-} from '@/lib/app-data-store'
-import {
-  getUserOnboardingDismissals,
-  updateUserOnboardingDismissals,
-} from '@/lib/onboarding-dismissals'
-import { starterStoredState } from '@/lib/default-state'
+} from "@/lib/app-data-store";
+import { starterStoredState } from "@/lib/default-state";
 import {
   clearUserReportDayFormDrafts,
   clearUserReportDraftEntries,
-  getUserCurrentScreen,
   getUserReportDraftEntries,
   updateUserCurrentScreen,
   updateUserReportDraftEntries,
-} from '@/lib/ui-preferences'
-import { toMonthKey } from '@/lib/calculations'
+} from "@/lib/ui-preferences";
 import {
   getCurrentSession,
   hasSupabaseConfig,
   onSupabaseAuthStateChange,
   signInWithEmailPassword,
   signOutFromSupabase,
-} from '@/lib/supabase'
-import type {
-  DailyEntry,
-  MonthlySummary,
-  Screen,
-  Settings,
-} from '@/lib/types'
+} from "@/lib/supabase";
+import type { DailyEntry, MonthlySummary, Screen, Settings } from "@/lib/types";
 
 const navItems: Array<{ id: Screen; label: string }> = [
-  { id: 'dashboard', label: 'Home' },
-  { id: 'daily-log', label: 'Report' },
-  { id: 'configuration', label: 'Configuration' },
-]
+  { id: "dashboard", label: "Home" },
+  { id: "daily-log", label: "Report" },
+  { id: "configuration", label: "Configuration" },
+];
 
 function cloneEntries(entries: DailyEntry[]) {
-  return entries.map((entry) => ({ ...entry }))
+  return entries.map((entry) => ({ ...entry }));
 }
 
 function removeEntryByDate(entries: DailyEntry[], dateKey: string) {
-  return entries.filter((entry) => entry.date !== dateKey)
+  return entries.filter((entry) => entry.date !== dateKey);
 }
 
 function getComparableEntries(entries: DailyEntry[]) {
-  return [...entries].sort((left, right) => left.date.localeCompare(right.date))
+  return [...entries].sort((left, right) =>
+    left.date.localeCompare(right.date),
+  );
 }
 
 function areEntriesEqual(left: DailyEntry[], right: DailyEntry[]) {
   if (left.length !== right.length) {
-    return false
+    return false;
   }
 
-  const comparableLeft = getComparableEntries(left)
-  const comparableRight = getComparableEntries(right)
+  const comparableLeft = getComparableEntries(left);
+  const comparableRight = getComparableEntries(right);
 
   return comparableLeft.every((leftEntry, index) => {
-    const rightEntry = comparableRight[index]
+    const rightEntry = comparableRight[index];
 
     return (
       leftEntry.date === rightEntry.date &&
-      (leftEntry.dayStatus ?? 'worked') === (rightEntry.dayStatus ?? 'worked') &&
+      (leftEntry.dayStatus ?? "worked") ===
+        (rightEntry.dayStatus ?? "worked") &&
       leftEntry.hours === rightEntry.hours &&
       leftEntry.invoicedIncome === rightEntry.invoicedIncome &&
       leftEntry.paidIncome === rightEntry.paidIncome &&
       leftEntry.expenses === rightEntry.expenses &&
-      (leftEntry.note ?? '') === (rightEntry.note ?? '') &&
-      (leftEntry.source ?? '') === (rightEntry.source ?? '')
-    )
-  })
+      (leftEntry.note ?? "") === (rightEntry.note ?? "") &&
+      (leftEntry.source ?? "") === (rightEntry.source ?? "")
+    );
+  });
 }
 
 function hasFutureDatedEntries(entries: DailyEntry[], todayDateKey: string) {
-  return entries.some((entry) => entry.date > todayDateKey)
+  return entries.some((entry) => entry.date > todayDateKey);
 }
 
 function getNewSummaryConflictMonthKeys(
@@ -97,15 +92,20 @@ function getNewSummaryConflictMonthKeys(
 ) {
   const summaryMonthKeys = new Set(
     monthlySummaries
-      .filter((summary) => summary.monthType === 'business')
+      .filter((summary) => summary.monthType === "business")
       .map((summary) => summary.monthKey),
-  )
-  const savedEntryMonthKeys = new Set(savedEntries.map((entry) => entry.date.slice(0, 7)))
-  const nextEntryMonthKeys = new Set(nextEntries.map((entry) => entry.date.slice(0, 7)))
+  );
+  const savedEntryMonthKeys = new Set(
+    savedEntries.map((entry) => entry.date.slice(0, 7)),
+  );
+  const nextEntryMonthKeys = new Set(
+    nextEntries.map((entry) => entry.date.slice(0, 7)),
+  );
 
   return [...summaryMonthKeys].filter(
-    (monthKey) => nextEntryMonthKeys.has(monthKey) && !savedEntryMonthKeys.has(monthKey),
-  )
+    (monthKey) =>
+      nextEntryMonthKeys.has(monthKey) && !savedEntryMonthKeys.has(monthKey),
+  );
 }
 
 function getEmploymentSummaryConflictMonthKeys(
@@ -114,236 +114,285 @@ function getEmploymentSummaryConflictMonthKeys(
 ) {
   const employmentMonthKeys = new Set(
     monthlySummaries
-      .filter((summary) => summary.monthType === 'employment')
+      .filter((summary) => summary.monthType === "employment")
       .map((summary) => summary.monthKey),
-  )
-  const nextEntryMonthKeys = new Set(nextEntries.map((entry) => entry.date.slice(0, 7)))
+  );
+  const nextEntryMonthKeys = new Set(
+    nextEntries.map((entry) => entry.date.slice(0, 7)),
+  );
 
-  return [...employmentMonthKeys].filter((monthKey) => nextEntryMonthKeys.has(monthKey))
+  return [...employmentMonthKeys].filter((monthKey) =>
+    nextEntryMonthKeys.has(monthKey),
+  );
 }
 
 export default function Home() {
-  const todayDateKey = new Date().toISOString().slice(0, 10)
-  const [currentScreen, setCurrentScreen] = useState<Screen>(starterStoredState.currentScreen)
-  const [entries, setEntries] = useState<DailyEntry[]>(starterStoredState.entries)
-  const [reportDraftEntries, setReportDraftEntries] = useState<DailyEntry[] | null>(null)
+  const todayDateKey = new Date().toISOString().slice(0, 10);
+  const [currentScreen, setCurrentScreen] = useState<Screen>(
+    starterStoredState.currentScreen,
+  );
+  const [entries, setEntries] = useState<DailyEntry[]>(
+    starterStoredState.entries,
+  );
+  const [reportDraftEntries, setReportDraftEntries] = useState<
+    DailyEntry[] | null
+  >(null);
   const [monthlySummaries, setMonthlySummaries] = useState<MonthlySummary[]>(
     starterStoredState.monthlySummaries,
-  )
-  const [settings, setSettings] = useState<Settings>(starterStoredState.settings)
-  const [hasCheckedSession, setHasCheckedSession] = useState(false)
-  const [hasLoadedRemoteState, setHasLoadedRemoteState] = useState(false)
-  const [displayName, setDisplayName] = useState<string | undefined>(undefined)
-  const [settingsFocusRequest, setSettingsFocusRequest] = useState(0)
-  const [backfillFocusRequest, setBackfillFocusRequest] = useState(0)
-  const [reportResetRequest, setReportResetRequest] = useState(0)
-  const [fillMissingDaysRequest, setFillMissingDaysRequest] = useState(0)
-  const [dismissedCurrentMonthReminderMonthKey, setDismissedCurrentMonthReminderMonthKey] =
-    useState('')
-  const [session, setSession] = useState<Session | null>(null)
-  const [isSigningIn, setIsSigningIn] = useState(false)
-  const [isSigningOut, setIsSigningOut] = useState(false)
-  const [isUnsavedReportModalOpen, setIsUnsavedReportModalOpen] = useState(false)
-  const [isUnsavedConfigurationModalOpen, setIsUnsavedConfigurationModalOpen] = useState(false)
-  const [isSummaryConflictWarningOpen, setIsSummaryConflictWarningOpen] = useState(false)
-  const [isEmploymentMonthWarningOpen, setIsEmploymentMonthWarningOpen] = useState(false)
-  const [isFutureReportWarningOpen, setIsFutureReportWarningOpen] = useState(false)
-  const [pendingSummaryConflictSaveEntries, setPendingSummaryConflictSaveEntries] = useState<
+  );
+  const [settings, setSettings] = useState<Settings>(
+    starterStoredState.settings,
+  );
+  const [hasCheckedSession, setHasCheckedSession] = useState(false);
+  const [hasLoadedRemoteState, setHasLoadedRemoteState] = useState(false);
+  const [displayName, setDisplayName] = useState<string | undefined>(undefined);
+  const [settingsFocusRequest, setSettingsFocusRequest] = useState(0);
+  const [backfillFocusRequest, setBackfillFocusRequest] = useState(0);
+  const [reportResetRequest, setReportResetRequest] = useState(0);
+  const [fillMissingDaysRequest, setFillMissingDaysRequest] = useState(0);
+  const [fillMissingDayTargetDateKey, setFillMissingDayTargetDateKey] =
+    useState<string | undefined>(undefined);
+  const [
+    isReportsAlertDismissedForSession,
+    setIsReportsAlertDismissedForSession,
+  ] = useState(false);
+  const [shouldShowDashboardGreeting, setShouldShowDashboardGreeting] =
+    useState(false);
+  const [session, setSession] = useState<Session | null>(null);
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const [isUnsavedReportModalOpen, setIsUnsavedReportModalOpen] =
+    useState(false);
+  const [isUnsavedConfigurationModalOpen, setIsUnsavedConfigurationModalOpen] =
+    useState(false);
+  const [isSummaryConflictWarningOpen, setIsSummaryConflictWarningOpen] =
+    useState(false);
+  const [isEmploymentMonthWarningOpen, setIsEmploymentMonthWarningOpen] =
+    useState(false);
+  const [isFutureReportWarningOpen, setIsFutureReportWarningOpen] =
+    useState(false);
+  const [
+    pendingSummaryConflictSaveEntries,
+    setPendingSummaryConflictSaveEntries,
+  ] = useState<DailyEntry[] | null>(null);
+  const [pendingFutureSaveEntries, setPendingFutureSaveEntries] = useState<
     DailyEntry[] | null
-  >(null)
-  const [pendingFutureSaveEntries, setPendingFutureSaveEntries] = useState<DailyEntry[] | null>(null)
-  const [pendingScreen, setPendingScreen] = useState<Screen | null>(null)
-  const [toastErrorMessage, setToastErrorMessage] = useState('')
-  const [hasHydratedReportDraftEntries, setHasHydratedReportDraftEntries] = useState(false)
-  const [hasUnsavedConfigurationChanges, setHasUnsavedConfigurationChanges] = useState(false)
-  const configurationNavigationHandlersRef = useRef<ConfigurationNavigationHandlers | null>(null)
+  >(null);
+  const [pendingScreen, setPendingScreen] = useState<Screen | null>(null);
+  const [toastErrorMessage, setToastErrorMessage] = useState("");
+  const [hasHydratedReportDraftEntries, setHasHydratedReportDraftEntries] =
+    useState(false);
+  const [hasUnsavedReportFieldDrafts, setHasUnsavedReportFieldDrafts] =
+    useState(false);
+  const [hasUnsavedConfigurationChanges, setHasUnsavedConfigurationChanges] =
+    useState(false);
+  const configurationNavigationHandlersRef =
+    useRef<ConfigurationNavigationHandlers | null>(null);
+  const dailyLogNavigationHandlersRef =
+    useRef<DailyLogNavigationHandlers | null>(null);
+  const hasUnsavedReportEntryChanges =
+    reportDraftEntries !== null &&
+    !areEntriesEqual(reportDraftEntries, entries);
   const hasUnsavedReportChanges =
-    reportDraftEntries !== null && !areEntriesEqual(reportDraftEntries, entries)
+    hasUnsavedReportEntryChanges || hasUnsavedReportFieldDrafts;
 
   useEffect(() => {
-    let isActive = true
-    let hasResolvedSession = false
+    let isActive = true;
+    let hasResolvedSession = false;
 
     if (!hasSupabaseConfig()) {
-      setHasCheckedSession(true)
+      setHasCheckedSession(true);
       return () => {
-        isActive = false
-      }
+        isActive = false;
+      };
     }
 
     const fallbackTimer = window.setTimeout(() => {
       if (!isActive || hasResolvedSession) {
-        return
+        return;
       }
 
-      console.warn('[Financial Goal] Session check timed out. Falling back to logged-out state.')
-      setSession(null)
-      setToastErrorMessage('Session error. Could not restore your session. Try signing in again.')
-      setHasCheckedSession(true)
-    }, 2500)
+      console.warn(
+        "[Financial Goal] Session check timed out. Falling back to logged-out state.",
+      );
+      setSession(null);
+      setToastErrorMessage(
+        "Session error. Could not restore your session. Try signing in again.",
+      );
+      setHasCheckedSession(true);
+    }, 2500);
 
     void getCurrentSession()
       .then((currentSession) => {
         if (!isActive) {
-          return
+          return;
         }
 
-        hasResolvedSession = true
-        window.clearTimeout(fallbackTimer)
-        setSession(currentSession)
-        setHasCheckedSession(true)
+        hasResolvedSession = true;
+        window.clearTimeout(fallbackTimer);
+        setSession(currentSession);
+        setHasCheckedSession(true);
       })
       .catch((error) => {
-        console.error('[Financial Goal] Failed to load auth session.', error)
+        console.error("[Financial Goal] Failed to load auth session.", error);
         if (!isActive) {
-          return
+          return;
         }
 
-        hasResolvedSession = true
-        window.clearTimeout(fallbackTimer)
-        setSession(null)
-        setToastErrorMessage('Session error. Could not restore your session. Try signing in again.')
-        setHasCheckedSession(true)
-      })
+        hasResolvedSession = true;
+        window.clearTimeout(fallbackTimer);
+        setSession(null);
+        setToastErrorMessage(
+          "Session error. Could not restore your session. Try signing in again.",
+        );
+        setHasCheckedSession(true);
+      });
 
     const unsubscribe = onSupabaseAuthStateChange((_event, nextSession) => {
       if (!isActive) {
-        return
+        return;
       }
 
-      hasResolvedSession = true
-      window.clearTimeout(fallbackTimer)
-      setSession(nextSession)
-      setToastErrorMessage('')
-      setHasCheckedSession(true)
-    })
+      hasResolvedSession = true;
+      window.clearTimeout(fallbackTimer);
+      setSession(nextSession);
+      setToastErrorMessage("");
+      setHasCheckedSession(true);
+    });
 
     return () => {
-      isActive = false
-      window.clearTimeout(fallbackTimer)
-      unsubscribe()
-    }
-  }, [])
+      isActive = false;
+      window.clearTimeout(fallbackTimer);
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (!hasCheckedSession || !session) {
-      setHasLoadedRemoteState(false)
-      setDisplayName(undefined)
-      return
+      setHasLoadedRemoteState(false);
+      setDisplayName(undefined);
+      return;
     }
 
-    let isActive = true
-    setHasLoadedRemoteState(false)
+    let isActive = true;
+    setHasLoadedRemoteState(false);
 
     void loadRemoteAppData()
       .then((remoteData) => {
         if (!isActive) {
-          return
+          return;
         }
 
-        setEntries(remoteData.entries)
-        setMonthlySummaries(remoteData.monthlySummaries)
-        setSettings(remoteData.settings)
-        setDisplayName(remoteData.displayName)
-        setHasLoadedRemoteState(true)
+        setEntries(remoteData.entries);
+        setMonthlySummaries(remoteData.monthlySummaries);
+        setSettings(remoteData.settings);
+        setDisplayName(remoteData.displayName);
+        setIsReportsAlertDismissedForSession(false);
+        setHasLoadedRemoteState(true);
       })
       .catch((error) => {
-        console.error('[Financial Goal] Failed to load Supabase data.', error)
+        console.error("[Financial Goal] Failed to load Supabase data.", error);
         if (!isActive) {
-          return
+          return;
         }
 
-        setDisplayName(undefined)
-        setHasLoadedRemoteState(true)
-      })
+        setDisplayName(undefined);
+        setHasLoadedRemoteState(true);
+      });
 
     return () => {
-      isActive = false
-    }
-  }, [hasCheckedSession, session])
+      isActive = false;
+    };
+  }, [hasCheckedSession, session]);
 
   useEffect(() => {
-    const userId = session?.user?.id
+    const userId = session?.user?.id;
 
     if (!userId) {
-      setDismissedCurrentMonthReminderMonthKey('')
-      setCurrentScreen('dashboard')
-      setReportDraftEntries(null)
-      setHasHydratedReportDraftEntries(false)
-      return
+      setIsReportsAlertDismissedForSession(false);
+      setShouldShowDashboardGreeting(false);
+      setCurrentScreen("dashboard");
+      setReportDraftEntries(null);
+      setHasHydratedReportDraftEntries(false);
+      setHasUnsavedReportFieldDrafts(false);
+      return;
     }
 
-    const dismissals = getUserOnboardingDismissals(userId)
-    setDismissedCurrentMonthReminderMonthKey(
-      dismissals.dismissedCurrentMonthReminderMonthKey ?? '',
-    )
+    setIsReportsAlertDismissedForSession(false);
+    setShouldShowDashboardGreeting(true);
 
-    const savedScreen = getUserCurrentScreen(userId)
-    setCurrentScreen(savedScreen ?? 'dashboard')
-  }, [session])
+    setCurrentScreen("dashboard");
+    updateUserCurrentScreen(userId, "dashboard");
+  }, [session]);
 
   useEffect(() => {
-    const userId = session?.user?.id
+    const userId = session?.user?.id;
 
     if (!userId) {
-      return
+      return;
     }
 
-    updateUserCurrentScreen(userId, currentScreen)
-  }, [currentScreen, session])
+    updateUserCurrentScreen(userId, currentScreen);
+  }, [currentScreen, session]);
 
   useEffect(() => {
-    const userId = session?.user?.id
+    const userId = session?.user?.id;
 
     if (!userId || !hasLoadedRemoteState) {
-      return
+      return;
     }
 
-    setReportDraftEntries(getUserReportDraftEntries(userId))
-    setHasHydratedReportDraftEntries(true)
-  }, [hasLoadedRemoteState, session])
+    setReportDraftEntries(getUserReportDraftEntries(userId));
+    setHasHydratedReportDraftEntries(true);
+  }, [hasLoadedRemoteState, session]);
 
   useEffect(() => {
     if (!hasLoadedRemoteState) {
-      return
+      return;
     }
 
     void saveDailyEntriesToSupabase(entries).catch((error) => {
-      console.error('[Financial Goal] Failed to save daily entries.', error)
-    })
-  }, [entries, hasLoadedRemoteState])
+      console.error("[Financial Goal] Failed to save daily entries.", error);
+    });
+  }, [entries, hasLoadedRemoteState]);
 
   useEffect(() => {
-    const userId = session?.user?.id
+    const userId = session?.user?.id;
 
     if (!userId || !hasLoadedRemoteState) {
-      return
+      return;
     }
 
-    if (reportDraftEntries !== null && !areEntriesEqual(reportDraftEntries, entries)) {
-      updateUserReportDraftEntries(userId, reportDraftEntries)
-      return
+    if (
+      reportDraftEntries !== null &&
+      !areEntriesEqual(reportDraftEntries, entries)
+    ) {
+      updateUserReportDraftEntries(userId, reportDraftEntries);
+      return;
     }
 
-    clearUserReportDraftEntries(userId)
-  }, [entries, hasLoadedRemoteState, reportDraftEntries, session])
+    clearUserReportDraftEntries(userId);
+  }, [entries, hasLoadedRemoteState, reportDraftEntries, session]);
 
   useEffect(() => {
-    if (currentScreen !== 'daily-log') {
-      return
+    if (currentScreen !== "daily-log") {
+      return;
     }
 
     if (!hasLoadedRemoteState || !hasHydratedReportDraftEntries) {
-      return
+      return;
     }
 
     if (reportDraftEntries === null) {
-      setReportDraftEntries(cloneEntries(entries))
-      return
+      setReportDraftEntries(cloneEntries(entries));
+      return;
     }
 
-    if (!hasUnsavedReportChanges && !areEntriesEqual(reportDraftEntries, entries)) {
-      setReportDraftEntries(cloneEntries(entries))
+    if (
+      !hasUnsavedReportChanges &&
+      !areEntriesEqual(reportDraftEntries, entries)
+    ) {
+      setReportDraftEntries(cloneEntries(entries));
     }
   }, [
     currentScreen,
@@ -352,270 +401,309 @@ export default function Home() {
     hasLoadedRemoteState,
     hasUnsavedReportChanges,
     reportDraftEntries,
-  ])
+  ]);
 
   useEffect(() => {
-    window.scrollTo({ top: 0, behavior: 'auto' })
-  }, [currentScreen])
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }, [currentScreen]);
 
   useEffect(() => {
-    console.log('[Financial Goal] currentScreen changed:', currentScreen)
-  }, [currentScreen])
+    console.log("[Financial Goal] currentScreen changed:", currentScreen);
+  }, [currentScreen]);
 
-  const handleUpsertEntry = useCallback((entry: DailyEntry) => {
-    setReportDraftEntries((previousEntries) => {
-      const draftEntries = previousEntries ?? cloneEntries(entries)
+  const handleUpsertEntry = useCallback(
+    (entry: DailyEntry) => {
+      setReportDraftEntries((previousEntries) => {
+        const draftEntries = previousEntries ?? cloneEntries(entries);
 
-      return [
-        entry,
-        ...draftEntries.filter((previousEntry) => previousEntry.date !== entry.date),
-      ]
-    })
-  }, [entries])
+        return [
+          entry,
+          ...draftEntries.filter(
+            (previousEntry) => previousEntry.date !== entry.date,
+          ),
+        ];
+      });
+    },
+    [entries],
+  );
 
-  const handleRemoveEntryForDate = useCallback((dateKey: string) => {
-    setReportDraftEntries((previousEntries) => {
-      const draftEntries = previousEntries ?? cloneEntries(entries)
-      return draftEntries.filter((previousEntry) => previousEntry.date !== dateKey)
-    })
-  }, [entries])
+  const handleRemoveEntryForDate = useCallback(
+    (dateKey: string) => {
+      setReportDraftEntries((previousEntries) => {
+        const draftEntries = previousEntries ?? cloneEntries(entries);
+        return draftEntries.filter(
+          (previousEntry) => previousEntry.date !== dateKey,
+        );
+      });
+    },
+    [entries],
+  );
 
   const handleDeleteSavedEntryImmediately = useCallback((dateKey: string) => {
     setEntries((previousEntries) => {
-      const nextSavedEntries = removeEntryByDate(previousEntries, dateKey)
+      const nextSavedEntries = removeEntryByDate(previousEntries, dateKey);
 
       setReportDraftEntries((previousDraftEntries) =>
-        removeEntryByDate(previousDraftEntries ?? cloneEntries(nextSavedEntries), dateKey),
-      )
+        removeEntryByDate(
+          previousDraftEntries ?? cloneEntries(nextSavedEntries),
+          dateKey,
+        ),
+      );
 
-      return nextSavedEntries
-    })
-  }, [])
+      return nextSavedEntries;
+    });
+  }, []);
 
   const proceedToScreen = (screen: Screen) => {
-    if (screen === 'daily-log' && reportDraftEntries === null) {
-      setReportDraftEntries(cloneEntries(entries))
+    if (screen === "daily-log" && reportDraftEntries === null) {
+      setReportDraftEntries(cloneEntries(entries));
     }
 
-    if (screen === 'daily-log') {
-      setReportResetRequest((currentValue) => currentValue + 1)
+    if (screen === "daily-log") {
+      setReportResetRequest((currentValue) => currentValue + 1);
     }
 
-    setCurrentScreen(screen)
-  }
+    setCurrentScreen(screen);
+  };
 
   const commitReportEntries = (entriesToSave: DailyEntry[]) => {
-    setEntries(cloneEntries(entriesToSave))
-    setReportDraftEntries(cloneEntries(entriesToSave))
-    const userId = session?.user?.id
+    setEntries(cloneEntries(entriesToSave));
+    setReportDraftEntries(cloneEntries(entriesToSave));
+    setHasUnsavedReportFieldDrafts(false);
+    const userId = session?.user?.id;
 
     if (userId) {
-      clearUserReportDayFormDrafts(userId)
-      clearUserReportDraftEntries(userId)
+      clearUserReportDayFormDrafts(userId);
+      clearUserReportDraftEntries(userId);
     }
-  }
+  };
 
   const finishSavingReportEntries = (entriesToSave: DailyEntry[]) => {
     if (hasFutureDatedEntries(entriesToSave, todayDateKey)) {
-      setPendingFutureSaveEntries(cloneEntries(entriesToSave))
-      setIsFutureReportWarningOpen(true)
-      return false
+      setPendingFutureSaveEntries(cloneEntries(entriesToSave));
+      setIsFutureReportWarningOpen(true);
+      return false;
     }
 
-    commitReportEntries(entriesToSave)
-    return true
-  }
+    commitReportEntries(entriesToSave);
+    return true;
+  };
 
   const handleSaveReportEntries = (nextEntries?: DailyEntry[]) => {
-    const entriesToSave = nextEntries ?? reportDraftEntries
+    const entriesToSave = nextEntries ?? reportDraftEntries;
 
     if (entriesToSave === null || !entriesToSave) {
-      return true
-    }
-
-    if (getEmploymentSummaryConflictMonthKeys(entriesToSave, monthlySummaries).length > 0) {
-      setIsEmploymentMonthWarningOpen(true)
-      return false
-    }
-
-    if (getNewSummaryConflictMonthKeys(entries, entriesToSave, monthlySummaries).length > 0) {
-      setPendingSummaryConflictSaveEntries(cloneEntries(entriesToSave))
-      setIsSummaryConflictWarningOpen(true)
-      return false
-    }
-
-    return finishSavingReportEntries(entriesToSave)
-  }
-
-  const handleDiscardReportEntries = () => {
-    setReportDraftEntries(cloneEntries(entries))
-    const userId = session?.user?.id
-
-    if (userId) {
-      clearUserReportDayFormDrafts(userId)
-      clearUserReportDraftEntries(userId)
-    }
-  }
-
-  const handleRegisterConfigurationNavigationHandlers = useCallback(
-    (handlers: ConfigurationNavigationHandlers | null) => {
-      configurationNavigationHandlersRef.current = handlers
-    },
-    [],
-  )
-
-  const handleScreenChange = (screen: Screen) => {
-    if (screen === currentScreen) {
-      return
-    }
-
-    if (currentScreen === 'daily-log' && screen !== 'daily-log' && hasUnsavedReportChanges) {
-      setPendingScreen(screen)
-      setIsUnsavedReportModalOpen(true)
-      return
+      return true;
     }
 
     if (
-      currentScreen === 'configuration' &&
-      screen !== 'configuration' &&
+      getEmploymentSummaryConflictMonthKeys(entriesToSave, monthlySummaries)
+        .length > 0
+    ) {
+      setIsEmploymentMonthWarningOpen(true);
+      return false;
+    }
+
+    if (
+      getNewSummaryConflictMonthKeys(entries, entriesToSave, monthlySummaries)
+        .length > 0
+    ) {
+      setPendingSummaryConflictSaveEntries(cloneEntries(entriesToSave));
+      setIsSummaryConflictWarningOpen(true);
+      return false;
+    }
+
+    return finishSavingReportEntries(entriesToSave);
+  };
+
+  const handleDiscardReportEntries = () => {
+    setReportDraftEntries(cloneEntries(entries));
+    setHasUnsavedReportFieldDrafts(false);
+    const userId = session?.user?.id;
+
+    if (userId) {
+      clearUserReportDayFormDrafts(userId);
+      clearUserReportDraftEntries(userId);
+    }
+  };
+
+  const handleRegisterConfigurationNavigationHandlers = useCallback(
+    (handlers: ConfigurationNavigationHandlers | null) => {
+      configurationNavigationHandlersRef.current = handlers;
+    },
+    [],
+  );
+
+  const handleRegisterDailyLogNavigationHandlers = useCallback(
+    (handlers: DailyLogNavigationHandlers | null) => {
+      dailyLogNavigationHandlersRef.current = handlers;
+    },
+    [],
+  );
+
+  const handleScreenChange = (screen: Screen) => {
+    if (screen === currentScreen) {
+      return;
+    }
+
+    if (
+      currentScreen === "daily-log" &&
+      screen !== "daily-log" &&
+      hasUnsavedReportChanges
+    ) {
+      setPendingScreen(screen);
+      setIsUnsavedReportModalOpen(true);
+      return;
+    }
+
+    if (
+      currentScreen === "configuration" &&
+      screen !== "configuration" &&
       hasUnsavedConfigurationChanges
     ) {
-      setPendingScreen(screen)
-      setIsUnsavedConfigurationModalOpen(true)
-      return
+      setPendingScreen(screen);
+      setIsUnsavedConfigurationModalOpen(true);
+      return;
     }
 
-    proceedToScreen(screen)
-  }
+    proceedToScreen(screen);
+  };
 
   const handleOpenConfigurationSetup = useCallback(() => {
-    setSettingsFocusRequest((currentValue) => currentValue + 1)
-    setCurrentScreen('configuration')
-  }, [])
+    setSettingsFocusRequest((currentValue) => currentValue + 1);
+    setCurrentScreen("configuration");
+  }, []);
 
   const handleAddPreviousMonths = useCallback(() => {
-    setBackfillFocusRequest((currentValue) => currentValue + 1)
-    setCurrentScreen('configuration')
-  }, [])
+    setBackfillFocusRequest((currentValue) => currentValue + 1);
+    setCurrentScreen("configuration");
+  }, []);
 
-  const handleFillMissingDays = useCallback(() => {
-    setFillMissingDaysRequest((currentValue) => currentValue + 1)
-    setCurrentScreen('daily-log')
-  }, [])
+  const handleFillMissingDays = useCallback((targetDateKey?: string) => {
+    setFillMissingDayTargetDateKey(targetDateKey);
+    setFillMissingDaysRequest((currentValue) => currentValue + 1);
+    setCurrentScreen("daily-log");
+  }, []);
 
   const handleDismissCurrentMonthReminder = useCallback(() => {
-    const userId = session?.user?.id
+    setIsReportsAlertDismissedForSession(true);
+  }, []);
 
-    if (!userId) {
-      return
-    }
+  const handleSaveConfiguration = useCallback(
+    async (nextSettings: Settings, nextMonthlySummaries: MonthlySummary[]) => {
+      try {
+        await Promise.all([
+          saveSettingsToSupabase(nextSettings),
+          saveMonthlySummariesToSupabase(nextMonthlySummaries),
+        ]);
 
-    const currentMonthKey = toMonthKey(new Date())
-    setDismissedCurrentMonthReminderMonthKey(currentMonthKey)
-    updateUserOnboardingDismissals(userId, {
-      dismissedCurrentMonthReminderMonthKey: currentMonthKey,
-    })
-  }, [session])
+        setSettings(nextSettings);
+        setMonthlySummaries(nextMonthlySummaries);
+      } catch (error) {
+        console.error("[Financial Goal] Failed to save configuration.", error);
+        setToastErrorMessage(
+          getErrorMessage(error, "Failed to save configuration."),
+        );
+        throw error;
+      }
+    },
+    [],
+  );
 
-  const handleSaveConfiguration = useCallback(async (
-    nextSettings: Settings,
-    nextMonthlySummaries: MonthlySummary[],
-  ) => {
-    try {
-      await Promise.all([
-        saveSettingsToSupabase(nextSettings),
-        saveMonthlySummariesToSupabase(nextMonthlySummaries),
-      ])
+  const handleDeleteSavedMonthSummary = useCallback(
+    async (monthKey: string) => {
+      const nextMonthlySummaries = monthlySummaries.filter(
+        (summary) => summary.monthKey !== monthKey,
+      );
 
-      setSettings(nextSettings)
-      setMonthlySummaries(nextMonthlySummaries)
-    } catch (error) {
-      console.error('[Financial Goal] Failed to save configuration.', error)
-      setToastErrorMessage(getErrorMessage(error, 'Failed to save configuration.'))
-      throw error
-    }
-  }, [])
-
-  const handleDeleteSavedMonthSummary = useCallback(async (monthKey: string) => {
-    const nextMonthlySummaries = monthlySummaries.filter((summary) => summary.monthKey !== monthKey)
-
-    try {
-      await saveMonthlySummariesToSupabase(nextMonthlySummaries)
-      setMonthlySummaries(nextMonthlySummaries)
-    } catch (error) {
-      console.error('[Financial Goal] Failed to delete saved month summary.', error)
-      setToastErrorMessage(getErrorMessage(error, 'Failed to delete saved month summary.'))
-      throw error
-    }
-  }, [monthlySummaries])
+      try {
+        await saveMonthlySummariesToSupabase(nextMonthlySummaries);
+        setMonthlySummaries(nextMonthlySummaries);
+      } catch (error) {
+        console.error(
+          "[Financial Goal] Failed to delete saved month summary.",
+          error,
+        );
+        setToastErrorMessage(
+          getErrorMessage(error, "Failed to delete saved month summary."),
+        );
+        throw error;
+      }
+    },
+    [monthlySummaries],
+  );
   const handleSignIn = async (email: string, password: string) => {
     if (!hasSupabaseConfig()) {
       setToastErrorMessage(
-        'Missing Supabase config. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local.',
-      )
-      return
+        "Missing Supabase config. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local.",
+      );
+      return;
     }
 
     if (!email || !password) {
-      setToastErrorMessage('Enter your email and password.')
-      return
+      setToastErrorMessage("Enter your email and password.");
+      return;
     }
 
-    setIsSigningIn(true)
-    setToastErrorMessage('')
+    setIsSigningIn(true);
+    setToastErrorMessage("");
 
     try {
-      await signInWithEmailPassword(email, password)
+      await signInWithEmailPassword(email, password);
     } catch (error) {
-      console.error('[Financial Goal] Sign in failed.', error)
-      const nextMessage = getSignInErrorMessage(error)
-      setToastErrorMessage(nextMessage)
+      console.error("[Financial Goal] Sign in failed.", error);
+      const nextMessage = getSignInErrorMessage(error);
+      setToastErrorMessage(nextMessage);
     } finally {
-      setIsSigningIn(false)
+      setIsSigningIn(false);
     }
-  }
+  };
 
   const handleSignOut = async () => {
-    setIsSigningOut(true)
-    setToastErrorMessage('')
+    setIsSigningOut(true);
+    setToastErrorMessage("");
 
     try {
-      await signOutFromSupabase()
-      setHasLoadedRemoteState(false)
+      await signOutFromSupabase();
+      setHasLoadedRemoteState(false);
     } catch (error) {
-      setToastErrorMessage(getErrorMessage(error, 'Sign out failed.'))
+      setToastErrorMessage(getErrorMessage(error, "Sign out failed."));
     } finally {
-      setIsSigningOut(false)
+      setIsSigningOut(false);
     }
-  }
+  };
 
-  let activeScreen: React.ReactNode
+  let activeScreen: React.ReactNode;
 
-  if (currentScreen === 'dashboard') {
+  if (currentScreen === "dashboard") {
     activeScreen = (
       <Dashboard
         displayName={displayName}
         entries={entries}
-        isCurrentMonthReminderDismissed={
-          dismissedCurrentMonthReminderMonthKey === toMonthKey(new Date())
-        }
+        isReportsAlertDismissed={isReportsAlertDismissedForSession}
         monthlySummaries={monthlySummaries}
+        onNavigate={handleScreenChange}
+        onGreetingShown={() => setShouldShowDashboardGreeting(false)}
         onOpenConfigurationSetup={handleOpenConfigurationSetup}
         onAddPreviousMonths={handleAddPreviousMonths}
         onDismissCurrentMonthReminder={handleDismissCurrentMonthReminder}
         onFillMissingDays={handleFillMissingDays}
         settings={settings}
+        shouldShowGreeting={shouldShowDashboardGreeting}
       />
-    )
-  } else if (currentScreen === 'daily-log') {
+    );
+  } else if (currentScreen === "daily-log") {
     activeScreen = (
       <DailyLog
         entries={reportDraftEntries ?? entries}
+        fillMissingDayTargetDateKey={fillMissingDayTargetDateKey}
         fillMissingDaysRequest={fillMissingDaysRequest}
         hasUnsavedChanges={hasUnsavedReportChanges}
         onDeleteSavedEntryImmediately={handleDeleteSavedEntryImmediately}
         onRemoveEntryForDate={handleRemoveEntryForDate}
+        onRegisterNavigationHandlers={handleRegisterDailyLogNavigationHandlers}
         onSaveEntries={handleSaveReportEntries}
+        onUnsavedDayInputDraftsChange={setHasUnsavedReportFieldDrafts}
         reportResetRequest={reportResetRequest}
         savedEntries={entries}
         settings={settings}
@@ -623,7 +711,7 @@ export default function Home() {
         onUpsertEntry={handleUpsertEntry}
         userId={session?.user?.id}
       />
-    )
+    );
   } else {
     activeScreen = (
       <ConfigurationScreen
@@ -631,31 +719,34 @@ export default function Home() {
         entries={entries}
         settingsFocusRequest={settingsFocusRequest}
         monthlySummaries={monthlySummaries}
-        onRegisterNavigationHandlers={handleRegisterConfigurationNavigationHandlers}
+        onRegisterNavigationHandlers={
+          handleRegisterConfigurationNavigationHandlers
+        }
         onSaveConfiguration={handleSaveConfiguration}
         onDeleteSavedMonthSummary={handleDeleteSavedMonthSummary}
         onUnsavedChangesChange={setHasUnsavedConfigurationChanges}
         settings={settings}
         userId={session?.user?.id}
       />
-    )
+    );
   }
 
-  const isConfigured = hasSupabaseConfig()
+  const isConfigured = hasSupabaseConfig();
+  const isDashboardScreen = currentScreen === "dashboard";
 
   useEffect(() => {
     if (!toastErrorMessage) {
-      return
+      return;
     }
 
     const timeoutId = window.setTimeout(() => {
-      setToastErrorMessage('')
-    }, 5000)
+      setToastErrorMessage("");
+    }, 5000);
 
     return () => {
-      window.clearTimeout(timeoutId)
-    }
-  }, [toastErrorMessage])
+      window.clearTimeout(timeoutId);
+    };
+  }, [toastErrorMessage]);
 
   if (!session) {
     return (
@@ -664,7 +755,7 @@ export default function Home() {
 
         <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-[30rem] flex-col px-4 pt-4 sm:px-5">
           <div className="mb-4 rounded-[1.2rem] border border-border bg-amber-100 px-4 py-3 text-center text-sm font-semibold tracking-[0.16em] text-amber-900">
-            {hasCheckedSession ? 'SIGN IN' : 'AUTH'}
+            {hasCheckedSession ? "SIGN IN" : "AUTH"}
           </div>
           {!hasCheckedSession ? (
             <section className="mb-4 w-full rounded-[1.25rem] border border-border bg-card px-4 py-3 text-sm text-muted-foreground shadow-sm">
@@ -680,65 +771,84 @@ export default function Home() {
             />
           </section>
         </main>
-        <ErrorToast message={toastErrorMessage} onDismiss={() => setToastErrorMessage('')} />
+        <ErrorToast
+          message={toastErrorMessage}
+          onDismiss={() => setToastErrorMessage("")}
+        />
       </div>
-    )
+    );
   }
 
   return (
     <div className="relative isolate min-h-screen overflow-x-hidden bg-background text-foreground">
       <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-72 bg-[radial-gradient(circle_at_top_left,rgba(255,216,107,0.35),transparent_36%),radial-gradient(circle_at_top_right,rgba(136,201,255,0.28),transparent_32%),radial-gradient(circle_at_30%_75%,rgba(201,188,255,0.22),transparent_26%)]" />
 
-      <nav className="fixed inset-x-0 top-0 z-[160] px-4 pt-[calc(env(safe-area-inset-top)+0.75rem)]">
-        <div className="mx-auto flex max-w-[30rem] items-center justify-between gap-3">
-          <div className="grid grid-cols-3 gap-2 rounded-[1.6rem] border border-border bg-card/95 p-1.5 shadow-[0_18px_36px_rgba(24,32,48,0.14)] backdrop-blur">
-            {navItems.map((item) => {
-              const isActive = currentScreen === item.id
+      {!isDashboardScreen ? (
+        <nav className="fixed inset-x-0 top-0 z-[160] px-4 pt-[calc(env(safe-area-inset-top)+0.75rem)]">
+          <div className="mx-auto flex max-w-[30rem] items-center justify-between gap-3">
+            <div className="grid grid-cols-3 gap-2 rounded-[1.6rem] border border-border bg-card/95 p-1.5 shadow-[0_18px_36px_rgba(24,32,48,0.14)] backdrop-blur">
+              {navItems.map((item) => {
+                const isActive = currentScreen === item.id;
 
-              return (
-                <button
-                  key={item.id}
-                  aria-current={isActive ? 'page' : undefined}
-                  aria-label={item.label}
-                  className={`inline-flex h-11 w-11 items-center justify-center rounded-[1.1rem] transition ${
-                    isActive
-                      ? 'bg-[linear-gradient(135deg,rgba(255,216,107,0.95),rgba(255,143,122,0.85))] text-foreground shadow-sm'
-                      : 'bg-transparent text-muted-foreground hover:bg-muted/70'
-                  }`}
-                  onClick={() => handleScreenChange(item.id)}
-                  type="button"
-                >
-                  <span aria-hidden="true">
-                    {item.id === 'dashboard' ? (
-                      <HomeIcon />
-                    ) : item.id === 'daily-log' ? (
-                      <ClockIcon />
-                    ) : (
-                      <CogIcon />
-                    )}
-                  </span>
-                </button>
-              )
-            })}
+                return (
+                  <button
+                    key={item.id}
+                    aria-current={isActive ? "page" : undefined}
+                    aria-label={item.label}
+                    className={`inline-flex h-11 w-11 items-center justify-center rounded-[1.1rem] transition ${
+                      isActive
+                        ? "bg-[linear-gradient(135deg,rgba(255,216,107,0.95),rgba(255,143,122,0.85))] text-foreground shadow-sm"
+                        : "bg-transparent text-muted-foreground hover:bg-muted/70"
+                    }`}
+                    onClick={() => handleScreenChange(item.id)}
+                    type="button"
+                  >
+                    <span aria-hidden="true">
+                      {item.id === "dashboard" ? (
+                        <HomeIcon />
+                      ) : item.id === "daily-log" ? (
+                        <ClockIcon />
+                      ) : (
+                        <CogIcon />
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {currentScreen === "configuration" ? (
+              <button
+                aria-label={isSigningOut ? "Signing out" : "Sign out"}
+                className="inline-flex h-[42px] w-[42px] items-center justify-center rounded-full border border-[#f1ba6b]/45 bg-[#0f0b08]/92 text-[#ffd791] shadow-[0_0_16px_rgba(255,141,45,0.14),0_8px_18px_rgba(0,0,0,0.34)] transition hover:bg-[#19120d] disabled:opacity-60"
+                disabled={isSigningOut}
+                onClick={() => void handleSignOut()}
+                type="button"
+              >
+                <SignOutIcon />
+              </button>
+            ) : null}
           </div>
+        </nav>
+      ) : null}
 
-          <button
-            aria-label={isSigningOut ? 'Signing out' : 'Sign out'}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-border bg-card/95 text-foreground shadow-[0_18px_36px_rgba(24,32,48,0.14)] backdrop-blur transition hover:bg-muted/70 disabled:opacity-60"
-            disabled={isSigningOut}
-            onClick={() => void handleSignOut()}
-            type="button"
-          >
-            <SignOutIcon />
-          </button>
-        </div>
-      </nav>
-
-      <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-[30rem] flex-col px-4 pb-[calc(3rem+env(safe-area-inset-bottom))] pt-[calc(env(safe-area-inset-top)+5.75rem)] sm:px-5">
-        <section key={currentScreen} data-screen={currentScreen} className="w-full">
+      <main
+        className={
+          isDashboardScreen
+            ? "relative z-10 min-h-screen w-full"
+            : "relative z-10 mx-auto flex min-h-screen w-full max-w-[30rem] flex-col px-4 pb-[calc(3rem+env(safe-area-inset-bottom))] pt-[calc(env(safe-area-inset-top)+5.75rem)] sm:px-5"
+        }
+      >
+        <section
+          key={currentScreen}
+          data-screen={currentScreen}
+          className="w-full"
+        >
           {!hasLoadedRemoteState ? (
             <div className="rounded-[1.9rem] border border-border bg-card p-5 shadow-sm">
-              <p className="text-sm text-muted-foreground">Loading your data...</p>
+              <p className="text-sm text-muted-foreground">
+                Loading your data...
+              </p>
             </div>
           ) : (
             activeScreen
@@ -746,30 +856,37 @@ export default function Home() {
         </section>
       </main>
 
-      <ErrorToast message={toastErrorMessage} onDismiss={() => setToastErrorMessage('')} />
+      <ErrorToast
+        message={toastErrorMessage}
+        onDismiss={() => setToastErrorMessage("")}
+      />
       <WarningModal
         body="You have unsaved daily reports. Do you want to save them?"
         isOpen={isUnsavedReportModalOpen}
         onClose={() => {
-          setIsUnsavedReportModalOpen(false)
-          setPendingScreen(null)
+          setIsUnsavedReportModalOpen(false);
+          setPendingScreen(null);
         }}
         onPrimaryAction={() => {
-          setIsUnsavedReportModalOpen(false)
-          const wasSavedImmediately = handleSaveReportEntries()
+          setIsUnsavedReportModalOpen(false);
+          const wasSavedImmediately =
+            hasUnsavedReportFieldDrafts && dailyLogNavigationHandlersRef.current
+              ? dailyLogNavigationHandlersRef.current.save()
+              : handleSaveReportEntries();
 
           if (wasSavedImmediately && pendingScreen) {
-            proceedToScreen(pendingScreen)
-            setPendingScreen(null)
+            proceedToScreen(pendingScreen);
+            setPendingScreen(null);
           }
         }}
         onSecondaryAction={() => {
-          handleDiscardReportEntries()
-          setIsUnsavedReportModalOpen(false)
+          dailyLogNavigationHandlersRef.current?.discard();
+          handleDiscardReportEntries();
+          setIsUnsavedReportModalOpen(false);
 
           if (pendingScreen) {
-            proceedToScreen(pendingScreen)
-            setPendingScreen(null)
+            proceedToScreen(pendingScreen);
+            setPendingScreen(null);
           }
         }}
         primaryActionLabel="Save"
@@ -780,34 +897,35 @@ export default function Home() {
         body="There are unsaved changes, do you want to save them or discard and leave"
         isOpen={isUnsavedConfigurationModalOpen}
         onClose={() => {
-          setIsUnsavedConfigurationModalOpen(false)
-          setPendingScreen(null)
+          setIsUnsavedConfigurationModalOpen(false);
+          setPendingScreen(null);
         }}
         onPrimaryAction={async () => {
-          const wasSaved = await configurationNavigationHandlersRef.current?.save()
+          const wasSaved =
+            await configurationNavigationHandlersRef.current?.save();
 
           if (!wasSaved) {
-            setIsUnsavedConfigurationModalOpen(false)
-            setPendingScreen(null)
-            return
+            setIsUnsavedConfigurationModalOpen(false);
+            setPendingScreen(null);
+            return;
           }
 
-          setIsUnsavedConfigurationModalOpen(false)
-          setHasUnsavedConfigurationChanges(false)
+          setIsUnsavedConfigurationModalOpen(false);
+          setHasUnsavedConfigurationChanges(false);
 
           if (pendingScreen) {
-            proceedToScreen(pendingScreen)
-            setPendingScreen(null)
+            proceedToScreen(pendingScreen);
+            setPendingScreen(null);
           }
         }}
         onSecondaryAction={() => {
-          configurationNavigationHandlersRef.current?.discard()
-          setHasUnsavedConfigurationChanges(false)
-          setIsUnsavedConfigurationModalOpen(false)
+          configurationNavigationHandlersRef.current?.discard();
+          setHasUnsavedConfigurationChanges(false);
+          setIsUnsavedConfigurationModalOpen(false);
 
           if (pendingScreen) {
-            proceedToScreen(pendingScreen)
-            setPendingScreen(null)
+            proceedToScreen(pendingScreen);
+            setPendingScreen(null);
           }
         }}
         primaryActionLabel="Save"
@@ -818,18 +936,18 @@ export default function Home() {
         body="This month is marked as a non-business month. Adding daily business entries here would make your calculations inaccurate."
         isOpen={isEmploymentMonthWarningOpen}
         onClose={() => {
-          setIsEmploymentMonthWarningOpen(false)
-          setPendingScreen(null)
+          setIsEmploymentMonthWarningOpen(false);
+          setPendingScreen(null);
         }}
         onPrimaryAction={() => {
-          setIsEmploymentMonthWarningOpen(false)
-          setBackfillFocusRequest((currentValue) => currentValue + 1)
-          proceedToScreen('configuration')
-          setPendingScreen(null)
+          setIsEmploymentMonthWarningOpen(false);
+          setBackfillFocusRequest((currentValue) => currentValue + 1);
+          proceedToScreen("configuration");
+          setPendingScreen(null);
         }}
         onSecondaryAction={() => {
-          setIsEmploymentMonthWarningOpen(false)
-          setPendingScreen(null)
+          setIsEmploymentMonthWarningOpen(false);
+          setPendingScreen(null);
         }}
         primaryActionLabel="Go to month setup"
         secondaryActionLabel="Close"
@@ -839,30 +957,30 @@ export default function Home() {
         body="Adding a daily entry here will make daily entries the source of truth for this month. Your monthly summary will no longer be used for calculations unless all daily entries for that month are removed. This may change your dashboard forecasts and tax planning."
         isOpen={isSummaryConflictWarningOpen}
         onClose={() => {
-          setIsSummaryConflictWarningOpen(false)
-          setPendingSummaryConflictSaveEntries(null)
-          setPendingScreen(null)
+          setIsSummaryConflictWarningOpen(false);
+          setPendingSummaryConflictSaveEntries(null);
+          setPendingScreen(null);
         }}
         onPrimaryAction={() => {
-          const entriesToSave = pendingSummaryConflictSaveEntries
-          setIsSummaryConflictWarningOpen(false)
-          setPendingSummaryConflictSaveEntries(null)
+          const entriesToSave = pendingSummaryConflictSaveEntries;
+          setIsSummaryConflictWarningOpen(false);
+          setPendingSummaryConflictSaveEntries(null);
 
           if (!entriesToSave) {
-            return
+            return;
           }
 
-          const wasSavedImmediately = finishSavingReportEntries(entriesToSave)
+          const wasSavedImmediately = finishSavingReportEntries(entriesToSave);
 
           if (wasSavedImmediately && pendingScreen) {
-            proceedToScreen(pendingScreen)
-            setPendingScreen(null)
+            proceedToScreen(pendingScreen);
+            setPendingScreen(null);
           }
         }}
         onSecondaryAction={() => {
-          setIsSummaryConflictWarningOpen(false)
-          setPendingSummaryConflictSaveEntries(null)
-          setPendingScreen(null)
+          setIsSummaryConflictWarningOpen(false);
+          setPendingSummaryConflictSaveEntries(null);
+          setPendingScreen(null);
         }}
         primaryActionLabel="Save daily entry"
         secondaryActionLabel="Cancel"
@@ -872,45 +990,45 @@ export default function Home() {
         body="You have one or more daily reports on future dates. They can still be saved, but your dashboard may look ahead before those days actually happen."
         isOpen={isFutureReportWarningOpen}
         onClose={() => {
-          setIsFutureReportWarningOpen(false)
-          setPendingFutureSaveEntries(null)
-          setPendingScreen(null)
+          setIsFutureReportWarningOpen(false);
+          setPendingFutureSaveEntries(null);
+          setPendingScreen(null);
         }}
         onPrimaryAction={() => {
           if (pendingFutureSaveEntries) {
-            commitReportEntries(pendingFutureSaveEntries)
+            commitReportEntries(pendingFutureSaveEntries);
           }
 
-          setIsFutureReportWarningOpen(false)
-          setPendingFutureSaveEntries(null)
+          setIsFutureReportWarningOpen(false);
+          setPendingFutureSaveEntries(null);
 
           if (pendingScreen) {
-            proceedToScreen(pendingScreen)
-            setPendingScreen(null)
+            proceedToScreen(pendingScreen);
+            setPendingScreen(null);
           }
         }}
         onSecondaryAction={() => {
-          setIsFutureReportWarningOpen(false)
-          setPendingFutureSaveEntries(null)
-          setPendingScreen(null)
+          setIsFutureReportWarningOpen(false);
+          setPendingFutureSaveEntries(null);
+          setPendingScreen(null);
         }}
         primaryActionLabel="Save anyway"
         secondaryActionLabel="Go back"
         title="Future day reports included"
       />
     </div>
-  )
+  );
 }
 
 function ErrorToast({
   message,
   onDismiss,
 }: {
-  message: string
-  onDismiss: () => void
+  message: string;
+  onDismiss: () => void;
 }) {
   if (!message) {
-    return null
+    return null;
   }
 
   return (
@@ -930,7 +1048,7 @@ function ErrorToast({
         </button>
       </div>
     </div>
-  )
+  );
 }
 
 function ToastWarningIcon() {
@@ -943,10 +1061,15 @@ function ToastWarningIcon() {
         strokeLinejoin="round"
         strokeWidth="1.7"
       />
-      <path d="M12 9v4.3" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+      <path
+        d="M12 9v4.3"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
       <circle cx="12" cy="16.7" r="1" fill="currentColor" />
     </svg>
-  )
+  );
 }
 
 function ToastCloseIcon() {
@@ -959,54 +1082,54 @@ function ToastCloseIcon() {
         strokeWidth="1.8"
       />
     </svg>
-  )
+  );
 }
 
 function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message) {
-    return error.message
+    return error.message;
   }
 
-  return fallback
+  return fallback;
 }
 
 function getSignInErrorMessage(error: unknown) {
-  const rawMessage = getErrorMessage(error, '').toLowerCase()
+  const rawMessage = getErrorMessage(error, "").toLowerCase();
 
   if (
-    rawMessage.includes('invalid login credentials') ||
-    rawMessage.includes('email not confirmed') ||
-    rawMessage.includes('invalid credentials')
+    rawMessage.includes("invalid login credentials") ||
+    rawMessage.includes("email not confirmed") ||
+    rawMessage.includes("invalid credentials")
   ) {
-    return 'Invalid login credentials. Check your email and password.'
+    return "Invalid login credentials. Check your email and password.";
   }
 
   if (
-    rawMessage.includes('failed to fetch') ||
-    rawMessage.includes('fetch failed') ||
-    rawMessage.includes('network') ||
-    rawMessage.includes('load failed')
+    rawMessage.includes("failed to fetch") ||
+    rawMessage.includes("fetch failed") ||
+    rawMessage.includes("network") ||
+    rawMessage.includes("load failed")
   ) {
-    return 'Network error. Supabase auth service is unavailable or unreachable.'
+    return "Network error. Supabase auth service is unavailable or unreachable.";
   }
 
   if (
-    rawMessage.includes('session') ||
-    rawMessage.includes('refresh token') ||
-    rawMessage.includes('jwt')
+    rawMessage.includes("session") ||
+    rawMessage.includes("refresh token") ||
+    rawMessage.includes("jwt")
   ) {
-    return 'Session error. Clear the saved session and sign in again.'
+    return "Session error. Clear the saved session and sign in again.";
   }
 
   if (
-    rawMessage.includes('supabase') ||
-    rawMessage.includes('auth') ||
-    rawMessage.includes('service unavailable')
+    rawMessage.includes("supabase") ||
+    rawMessage.includes("auth") ||
+    rawMessage.includes("service unavailable")
   ) {
-    return 'Supabase auth service is unavailable. Check your auth configuration and try again.'
+    return "Supabase auth service is unavailable. Check your auth configuration and try again.";
   }
 
-  return `Unknown sign-in error.${rawMessage ? ` ${getErrorMessage(error, '')}` : ''}`.trim()
+  return `Unknown sign-in error.${rawMessage ? ` ${getErrorMessage(error, "")}` : ""}`.trim();
 }
 
 function HomeIcon() {
@@ -1020,7 +1143,7 @@ function HomeIcon() {
         strokeWidth="1.8"
       />
     </svg>
-  )
+  );
 }
 
 function ClockIcon() {
@@ -1035,7 +1158,7 @@ function ClockIcon() {
         strokeWidth="1.8"
       />
     </svg>
-  )
+  );
 }
 
 function CogIcon() {
@@ -1049,12 +1172,12 @@ function CogIcon() {
         strokeWidth="1.2"
       />
     </svg>
-  )
+  );
 }
 
 function SignOutIcon() {
   return (
-    <svg className="h-[1rem] w-[1rem]" fill="none" viewBox="0 0 24 24">
+    <svg className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24">
       <path
         d="M10 5.75H7.75A1.75 1.75 0 0 0 6 7.5v9a1.75 1.75 0 0 0 1.75 1.75H10"
         stroke="currentColor"
@@ -1070,5 +1193,5 @@ function SignOutIcon() {
         strokeWidth="1.8"
       />
     </svg>
-  )
+  );
 }
