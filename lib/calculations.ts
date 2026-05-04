@@ -127,13 +127,15 @@ export interface SetupCompleteness {
 }
 
 export function isMissingHistoricalData(
+  entries: DailyEntry[],
   monthlySummaries: MonthlySummary[],
   today = new Date(),
 ) {
-  return getMissingPreviousMonthSummaryKeys(monthlySummaries, today).length > 0
+  return getMissingPreviousMonthSummaryKeys(entries, monthlySummaries, today).length > 0
 }
 
 export function getMissingPreviousMonthSummaryKeys(
+  entries: DailyEntry[],
   monthlySummaries: MonthlySummary[],
   today = new Date(),
 ) {
@@ -147,10 +149,63 @@ export function getMissingPreviousMonthSummaryKeys(
       .filter((summary) => summary.monthKey.startsWith(`${currentYear}-`))
       .map((summary) => summary.monthKey),
   )
+  const reportedMonthKeys = new Set(
+    entries
+      .filter((entry) => entry.date.startsWith(`${currentYear}-`))
+      .map((entry) => entry.date.slice(0, 7)),
+  )
 
   return Array.from({ length: today.getMonth() }, (_, index) => {
     return `${currentYear}-${pad(index + 1)}`
-  }).filter((monthKey) => !existingMonthKeys.has(monthKey))
+  }).filter((monthKey) => {
+    return !existingMonthKeys.has(monthKey) && !reportedMonthKeys.has(monthKey)
+  })
+}
+
+export function getEarliestMissingPreviousMonthWeekday(
+  entries: DailyEntry[],
+  monthlySummaries: MonthlySummary[],
+  today = new Date(),
+) {
+  if (today.getMonth() === 0) {
+    return undefined
+  }
+
+  const currentYear = today.getFullYear()
+  const summaryMonthKeys = new Set(
+    monthlySummaries
+      .filter((summary) => summary.monthKey.startsWith(`${currentYear}-`))
+      .map((summary) => summary.monthKey),
+  )
+  const entryDays = new Set(entries.map((entry) => entry.date))
+  const entryMonthKeys = new Set(
+    entries
+      .filter((entry) => entry.date.startsWith(`${currentYear}-`))
+      .map((entry) => entry.date.slice(0, 7)),
+  )
+
+  for (let monthIndex = 0; monthIndex < today.getMonth(); monthIndex += 1) {
+    const monthKey = `${currentYear}-${pad(monthIndex + 1)}`
+
+    if (summaryMonthKeys.has(monthKey) || !entryMonthKeys.has(monthKey)) {
+      continue
+    }
+
+    const cursor = new Date(currentYear, monthIndex, 1)
+    const monthEnd = new Date(currentYear, monthIndex + 1, 0)
+
+    while (cursor <= monthEnd) {
+      const dateKey = toDateKey(cursor)
+
+      if (isWeekday(cursor) && !entryDays.has(dateKey)) {
+        return dateKey
+      }
+
+      cursor.setDate(cursor.getDate() + 1)
+    }
+  }
+
+  return undefined
 }
 
 export function getCurrentMonthWeekdayCoverage(
@@ -217,13 +272,14 @@ export function getEarliestMissingCurrentMonthWeekday(
 
 export function getSetupCompleteness(
   settings: Settings,
+  entries: DailyEntry[],
   monthlySummaries: MonthlySummary[],
   today = new Date(),
 ): SetupCompleteness {
   return {
     baseConfigurationComplete: hasValidBaseConfiguration(settings),
     isUsingStarterBaseSettings: isUsingStarterBaseSettings(settings),
-    previousMonthsComplete: !isMissingHistoricalData(monthlySummaries, today),
+    previousMonthsComplete: !isMissingHistoricalData(entries, monthlySummaries, today),
   }
 }
 
@@ -656,22 +712,6 @@ function getAnnualReserveModel(
   }
 }
 
-function projectCurrentMonthTotals(
-  currentMonthTotals: BusinessTotals,
-  currentMonthProgress: number,
-) {
-  if (!hasBusinessData(currentMonthTotals) || currentMonthProgress <= 0) {
-    return createEmptyBusinessTotals()
-  }
-
-  return toBusinessTotals({
-    hours: projectFromPaceOrZero(currentMonthTotals.hours, currentMonthProgress),
-    invoicedIncome: projectFromPaceOrZero(currentMonthTotals.invoicedIncome, currentMonthProgress),
-    paidIncome: projectFromPaceOrZero(currentMonthTotals.paidIncome, currentMonthProgress),
-    expenses: projectFromPaceOrZero(currentMonthTotals.expenses, currentMonthProgress),
-  })
-}
-
 function getPreviousMonthKeys(today: Date) {
   return Array.from({ length: today.getMonth() }, (_, index) => {
     return `${today.getFullYear()}-${pad(index + 1)}`
@@ -806,7 +846,6 @@ export function getCurrentMonthStats(
   today = new Date(),
 ): MonthStats {
   const currentMonthTotals = getMonthTotals(entries, monthlySummaries, toMonthKey(today))
-  const currentMonthProgress = getMonthProgress(today, getCurrentMonthRange(today).end)
   const completedPreviousMonths = today.getMonth()
   const previousMonthFraction = completedPreviousMonths / 12
   const currentMonthFraction = (completedPreviousMonths + 1) / 12
@@ -825,12 +864,8 @@ export function getCurrentMonthStats(
     previousMonthsReserveModel === undefined
       ? 0
       : previousMonthsReserveModel.remainingTaxReserveTarget * previousMonthFraction
-  const currentMonthProjectedTotals = projectCurrentMonthTotals(
-    currentMonthTotals,
-    currentMonthProgress,
-  )
   const monthEndTotals = combineYearlyIncomeTotals(previousMonthsTotals, {
-    business: currentMonthProjectedTotals,
+    business: currentMonthTotals,
     employment: getEmploymentTotalsFromSummary(monthlySummaries, toMonthKey(today)),
   })
   const monthEndReserveModel = getAnnualReserveModel(
@@ -863,8 +898,11 @@ export function getCurrentMonthStats(
   }
 }
 
-export function getBackfillMonthOption(monthlySummaries: MonthlySummary[]) {
-  const missingPreviousMonths = getMissingPreviousMonthSummaryKeys(monthlySummaries)
+export function getBackfillMonthOption(
+  entries: DailyEntry[],
+  monthlySummaries: MonthlySummary[],
+) {
+  const missingPreviousMonths = getMissingPreviousMonthSummaryKeys(entries, monthlySummaries)
 
   if (missingPreviousMonths.length > 0) {
     return missingPreviousMonths[0]

@@ -20,17 +20,25 @@ import { formatCurrencyPrecise, formatDate, formatHours } from '@/lib/formatters
 
 interface DailyLogProps {
   entries: DailyEntry[]
+  fillMissingDayTargetDateKey?: string
   fillMissingDaysRequest?: number
   hasUnsavedChanges?: boolean
   monthlySummaries: MonthlySummary[]
   onDeleteSavedEntryImmediately: (dateKey: string) => void
   onRemoveEntryForDate: (dateKey: string) => void
+  onRegisterNavigationHandlers?: (handlers: DailyLogNavigationHandlers | null) => void
   onSaveEntries: (nextEntries?: DailyEntry[]) => boolean | void
+  onUnsavedDayInputDraftsChange?: (hasUnsavedDrafts: boolean) => void
   onUpsertEntry: (entry: DailyEntry) => void
   reportResetRequest?: number
   savedEntries: DailyEntry[]
   settings: Settings
   userId?: string
+}
+
+export interface DailyLogNavigationHandlers {
+  discard: () => void
+  save: () => boolean | void
 }
 
 interface CalendarDay {
@@ -235,6 +243,56 @@ function getResolvedDraftInvoiceAmount(draft: DayInputDraft, settings: Settings)
   return 0
 }
 
+function persistDayInputDrafts(userId: string, drafts: Record<string, DayInputDraft>) {
+  if (Object.keys(drafts).length === 0) {
+    clearUserReportDayFormDrafts(userId)
+    return
+  }
+
+  updateUserReportDayFormDrafts(userId, drafts)
+}
+
+function getNextDayInputDrafts(
+  currentValue: Record<string, DayInputDraft>,
+  dateKey: string,
+  selectedEntry: DailyEntry | undefined,
+  field: keyof DayInputDraft,
+  value: string,
+) {
+  const existingDraft = currentValue[dateKey] ?? getEntryDraft(selectedEntry)
+  const nextDraft = {
+    ...existingDraft,
+    [field]: value,
+  }
+
+  if (isDraftEmpty(nextDraft) && !selectedEntry) {
+    const nextValue = { ...currentValue }
+    delete nextValue[dateKey]
+    return nextValue
+  }
+
+  return {
+    ...currentValue,
+    [dateKey]: nextDraft,
+  }
+}
+
+function hasMeaningfulDayInputDrafts(
+  drafts: Record<string, DayInputDraft>,
+  entries: DailyEntry[],
+) {
+  return Object.entries(drafts).some(([dateKey, draft]) => {
+    const entryDraft = getEntryDraft(entries.find((entry) => entry.date === dateKey))
+
+    return (
+      draft.hours !== entryDraft.hours ||
+      draft.invoicedIncome !== entryDraft.invoicedIncome ||
+      draft.paidIncome !== entryDraft.paidIncome ||
+      draft.expenses !== entryDraft.expenses
+    )
+  })
+}
+
 function getDailyDraftSaveState(draft: DayInputDraft, settings: Settings): DailyDraftSaveState {
   const values = {
     expenses: parseNumber(draft.expenses),
@@ -292,12 +350,15 @@ function getDailyDraftSaveState(draft: DayInputDraft, settings: Settings): Daily
 
 export function DailyLog({
   entries,
+  fillMissingDayTargetDateKey,
   fillMissingDaysRequest = 0,
   hasUnsavedChanges = false,
   monthlySummaries,
   onDeleteSavedEntryImmediately,
   onRemoveEntryForDate,
+  onRegisterNavigationHandlers,
   onSaveEntries,
+  onUnsavedDayInputDraftsChange,
   onUpsertEntry,
   reportResetRequest = 0,
   savedEntries,
@@ -322,8 +383,10 @@ export function DailyLog({
   const [validationIssue, setValidationIssue] = useState<DailyValidationIssue | null>(null)
   const [softWarning, setSoftWarning] = useState<DailySoftWarning | null>(null)
   const [pendingDeleteEntry, setPendingDeleteEntry] = useState<DailyEntry | null>(null)
+  const [loadedDayInputDraftsUserId, setLoadedDayInputDraftsUserId] = useState<string | null>(null)
   const formRef = useRef<HTMLElement | null>(null)
   const hoursInputRef = useRef<HTMLInputElement | null>(null)
+  const dayInputDraftsRef = useRef<Record<string, DayInputDraft>>({})
   const visibleMonthDate = parseMonthKey(visibleMonthKey)
   const { start, end } = getCurrentMonthRange(visibleMonthDate)
   const visibleWeekDays = useMemo(
@@ -407,25 +470,37 @@ export function DailyLog({
 
   useEffect(() => {
     if (!userId) {
+      dayInputDraftsRef.current = {}
       setDayInputDrafts({})
+      setLoadedDayInputDraftsUserId(null)
       return
     }
 
-    setDayInputDrafts(getUserReportDayFormDrafts(userId))
+    const savedDrafts = getUserReportDayFormDrafts(userId)
+    dayInputDraftsRef.current = savedDrafts
+    setDayInputDrafts(savedDrafts)
+    setLoadedDayInputDraftsUserId(userId)
   }, [userId])
 
   useEffect(() => {
-    if (!userId) {
+    dayInputDraftsRef.current = dayInputDrafts
+
+    if (!userId || loadedDayInputDraftsUserId !== userId) {
       return
     }
 
-    if (Object.keys(dayInputDrafts).length === 0) {
-      clearUserReportDayFormDrafts(userId)
-      return
-    }
+    persistDayInputDrafts(userId, dayInputDrafts)
+  }, [dayInputDrafts, loadedDayInputDraftsUserId, userId])
 
-    updateUserReportDayFormDrafts(userId, dayInputDrafts)
-  }, [dayInputDrafts, userId])
+  useEffect(() => {
+    onUnsavedDayInputDraftsChange?.(hasMeaningfulDayInputDrafts(dayInputDrafts, entries))
+  }, [dayInputDrafts, entries, onUnsavedDayInputDraftsChange])
+
+  useEffect(() => {
+    return () => {
+      onUnsavedDayInputDraftsChange?.(false)
+    }
+  }, [onUnsavedDayInputDraftsChange])
 
   useEffect(() => {
     if (reportResetRequest <= 0) {
@@ -442,7 +517,9 @@ export function DailyLog({
 
     const todayDate = parseDateKey(todayDateKey)
     const targetDateKey =
-      getEarliestMissingCurrentMonthWeekday(entries, todayDate) ?? todayDateKey
+      fillMissingDayTargetDateKey ??
+      getEarliestMissingCurrentMonthWeekday(entries, todayDate) ??
+      todayDateKey
     syncSelectedDate(targetDateKey, true)
     formRef.current?.scrollIntoView({
       behavior: 'smooth',
@@ -456,7 +533,7 @@ export function DailyLog({
     return () => {
       window.clearTimeout(focusTimeoutId)
     }
-  }, [entries, fillMissingDaysRequest, todayDateKey])
+  }, [entries, fillMissingDayTargetDateKey, fillMissingDaysRequest, todayDateKey])
 
   useEffect(() => {
     const nextDraft = selectedDraft ?? getEntryDraft(selectedEntry)
@@ -496,24 +573,22 @@ export function DailyLog({
       return
     }
 
-    setDayInputDrafts((currentValue) => {
-      const existingDraft = currentValue[date] ?? getEntryDraft(selectedEntry)
-      const nextDraft = {
-        ...existingDraft,
-        [field]: value,
-      }
+    const nextValue = getNextDayInputDrafts(
+      dayInputDraftsRef.current,
+      date,
+      selectedEntry,
+      field,
+      value,
+    )
 
-      if (isDraftEmpty(nextDraft) && !selectedEntry) {
-        const nextValue = { ...currentValue }
-        delete nextValue[date]
-        return nextValue
-      }
+    dayInputDraftsRef.current = nextValue
+    setDayInputDrafts(nextValue)
 
-      return {
-        ...currentValue,
-        [date]: nextDraft,
-      }
-    })
+    if (userId) {
+      persistDayInputDrafts(userId, nextValue)
+    }
+
+    onUnsavedDayInputDraftsChange?.(hasMeaningfulDayInputDrafts(nextValue, entries))
 
     if (!invalidField || !currentInvalidFields[invalidField]) {
       return
@@ -576,7 +651,7 @@ export function DailyLog({
         body: 'This month is marked as a non-business month. Adding daily business entries here would make your calculations inaccurate.',
       })
       syncSelectedDate(employmentDraftDateKey, true)
-      return
+      return false
     }
 
     Object.entries(dayInputDrafts).forEach(([draftDateKey, draft]) => {
@@ -630,7 +705,7 @@ export function DailyLog({
       setFormMessage('Complete the highlighted required fields before saving.')
       const [firstInvalidDateKey] = Object.keys(nextInvalidFieldsByDate)
       syncSelectedDate(firstInvalidDateKey, true)
-      return
+      return false
     }
 
     setInvalidFieldsByDate({})
@@ -639,6 +714,8 @@ export function DailyLog({
 
     if (didSaveContinue !== false) {
       setDayInputDrafts({})
+      dayInputDraftsRef.current = {}
+      onUnsavedDayInputDraftsChange?.(false)
       if (softWarnings.length > 0) {
         const warningDates = softWarnings.map((warning) => warning.body)
         const combinedBody =
@@ -655,7 +732,37 @@ export function DailyLog({
         setFormMessage('Saved daily reports.')
       }
     }
+
+    return didSaveContinue !== false
   }
+
+  const discardDayInputDrafts = () => {
+    const selectedEntryDraft = getEntryDraft(selectedEntry)
+
+    dayInputDraftsRef.current = {}
+    setDayInputDrafts({})
+    setInvalidFieldsByDate({})
+    setHours(selectedEntryDraft.hours)
+    setInvoicedIncome(selectedEntryDraft.invoicedIncome)
+    setPaidIncome(selectedEntryDraft.paidIncome)
+    setExpenses(selectedEntryDraft.expenses)
+    onUnsavedDayInputDraftsChange?.(false)
+
+    if (userId) {
+      clearUserReportDayFormDrafts(userId)
+    }
+  }
+
+  useEffect(() => {
+    onRegisterNavigationHandlers?.({
+      discard: discardDayInputDrafts,
+      save: handleSaveAllEntries,
+    })
+
+    return () => {
+      onRegisterNavigationHandlers?.(null)
+    }
+  })
 
   const handleMarkNoWork = () => {
     if (isSelectedMonthEmployment) {
