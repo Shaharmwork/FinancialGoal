@@ -10,13 +10,12 @@ import {
 import type { DailyEntry, MonthlySummary, Settings } from '@/lib/types'
 import {
   getCurrentMonthRange,
-  getEarliestMissingCurrentMonthWeekday,
   parseDateKey,
   parseMonthKey,
   toDateKey,
   toMonthKey,
 } from '@/lib/calculations'
-import { formatCurrencyPrecise, formatDate, formatHours } from '@/lib/formatters'
+import { formatCurrencyPrecise, formatDate, formatHours, formatNumber } from '@/lib/formatters'
 
 interface DailyLogProps {
   entries: DailyEntry[]
@@ -293,6 +292,74 @@ function hasMeaningfulDayInputDrafts(
   })
 }
 
+function getHandledReportDateKeys(
+  entries: DailyEntry[],
+  drafts: Record<string, DayInputDraft>,
+) {
+  const handledDateKeys = new Set(entries.map((entry) => entry.date))
+
+  Object.entries(drafts).forEach(([dateKey, draft]) => {
+    if (!isDraftEmpty(draft)) {
+      handledDateKeys.add(dateKey)
+    }
+  })
+
+  return handledDateKeys
+}
+
+function getEarliestMissingCurrentMonthWeekdayForReport(
+  entries: DailyEntry[],
+  drafts: Record<string, DayInputDraft>,
+  today = new Date(),
+) {
+  const { start } = getCurrentMonthRange(today)
+  const todayKey = toDateKey(today)
+  const handledDateKeys = getHandledReportDateKeys(entries, drafts)
+  const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate())
+
+  while (toDateKey(cursor) < todayKey) {
+    const dateKey = toDateKey(cursor)
+
+    if (!isWeekend(cursor) && !handledDateKeys.has(dateKey)) {
+      return dateKey
+    }
+
+    cursor.setDate(cursor.getDate() + 1)
+  }
+
+  return undefined
+}
+
+function getFirstMissingWeekdayInWeekForReport(
+  weekStartKey: string,
+  entries: DailyEntry[],
+  drafts: Record<string, DayInputDraft>,
+  today = new Date(),
+) {
+  const todayKey = toDateKey(today)
+  const handledDateKeys = getHandledReportDateKeys(entries, drafts)
+  const weekStart = parseDateKey(weekStartKey)
+
+  for (let dayOffset = 0; dayOffset < 7; dayOffset += 1) {
+    const cursor = new Date(
+      weekStart.getFullYear(),
+      weekStart.getMonth(),
+      weekStart.getDate() + dayOffset,
+    )
+    const dateKey = toDateKey(cursor)
+
+    if (dateKey >= todayKey) {
+      continue
+    }
+
+    if (!isWeekend(cursor) && !handledDateKeys.has(dateKey)) {
+      return dateKey
+    }
+  }
+
+  return undefined
+}
+
 function getDailyDraftSaveState(draft: DayInputDraft, settings: Settings): DailyDraftSaveState {
   const values = {
     expenses: parseNumber(draft.expenses),
@@ -387,6 +454,7 @@ export function DailyLog({
   const formRef = useRef<HTMLElement | null>(null)
   const hoursInputRef = useRef<HTMLInputElement | null>(null)
   const dayInputDraftsRef = useRef<Record<string, DayInputDraft>>({})
+  const handledFillMissingDaysRequestRef = useRef(0)
   const visibleMonthDate = parseMonthKey(visibleMonthKey)
   const { start, end } = getCurrentMonthRange(visibleMonthDate)
   const visibleWeekDays = useMemo(
@@ -429,6 +497,9 @@ export function DailyLog({
     settings.defaultShiftHours > 0 &&
     typeof settings.defaultShiftIncome === 'number' &&
     settings.defaultShiftIncome > 0
+  const configuredHourlyRate = hasConfiguredInvoiceDefaults
+    ? (settings.defaultShiftIncome ?? 0) / (settings.defaultShiftHours ?? 1)
+    : 0
 
   const syncSelectedDate = (nextDateKey: string, collapseMonth = false) => {
     const nextDate = parseDateKey(nextDateKey)
@@ -511,14 +582,19 @@ export function DailyLog({
   }, [reportResetRequest, todayDateKey])
 
   useEffect(() => {
-    if (fillMissingDaysRequest <= 0) {
+    if (
+      fillMissingDaysRequest <= 0 ||
+      handledFillMissingDaysRequestRef.current === fillMissingDaysRequest
+    ) {
       return
     }
+
+    handledFillMissingDaysRequestRef.current = fillMissingDaysRequest
 
     const todayDate = parseDateKey(todayDateKey)
     const targetDateKey =
       fillMissingDayTargetDateKey ??
-      getEarliestMissingCurrentMonthWeekday(entries, todayDate) ??
+      getEarliestMissingCurrentMonthWeekdayForReport(entries, dayInputDraftsRef.current, todayDate) ??
       todayDateKey
     syncSelectedDate(targetDateKey, true)
     formRef.current?.scrollIntoView({
@@ -545,13 +621,15 @@ export function DailyLog({
   }, [date, selectedDraft, selectedEntry])
 
   const handleWeekChange = (delta: number) => {
-    const selectedDate = parseDateKey(date)
-    const visibleWeekStart = parseDateKey(visibleWeekStartKey)
-    const dayOffset = Math.round(
-      (selectedDate.getTime() - visibleWeekStart.getTime()) / (24 * 60 * 60 * 1000),
-    )
     const nextWeekStartKey = shiftDateKey(visibleWeekStartKey, delta * 7)
-    const nextSelectedDateKey = shiftDateKey(nextWeekStartKey, Math.min(Math.max(dayOffset, 0), 6))
+    const nextSelectedDateKey =
+      getFirstMissingWeekdayInWeekForReport(
+        nextWeekStartKey,
+        entries,
+        dayInputDraftsRef.current,
+        today,
+      ) ?? nextWeekStartKey
+
     syncSelectedDate(nextSelectedDateKey)
   }
 
@@ -1219,7 +1297,9 @@ export function DailyLog({
             />
             <span className="mt-2 block text-xs text-muted-foreground">
               {hasConfiguredInvoiceDefaults
-                ? 'Leave empty to calculate the default from your hours and configuration.'
+                ? `Leave empty to auto-calculate at ${formatCurrencyPrecise(configuredHourlyRate)} per hour (${formatCurrencyPrecise(
+                    settings.defaultShiftIncome ?? 0,
+                  )} / ${formatNumber(settings.defaultShiftHours ?? 0)}h).`
                 : 'Enter the invoice amount manually until you finish base configuration.'}
             </span>
           </label>
