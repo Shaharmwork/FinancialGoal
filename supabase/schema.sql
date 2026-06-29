@@ -38,6 +38,21 @@ alter table public.daily_entries
   add constraint daily_entries_day_status_check
   check (day_status in ('worked', 'no_work', 'vacation'));
 
+
+create table if not exists public.daily_entry_work_items (
+  id uuid primary key default gen_random_uuid(),
+  daily_entry_id text not null references public.daily_entries(id) on delete cascade,
+  project_name text,
+  hours numeric not null default 0,
+  hourly_rate numeric,
+  invoiced_income numeric not null default 0,
+  created_at timestamptz not null default timezone('utc', now()),
+  line_index integer not null default 0
+);
+
+create index if not exists daily_entry_work_items_daily_entry_id_idx
+  on public.daily_entry_work_items (daily_entry_id);
+
 create table if not exists public.monthly_summaries (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null,
@@ -117,6 +132,7 @@ execute function public.set_updated_at();
 
 alter table public.app_settings enable row level security;
 alter table public.daily_entries enable row level security;
+alter table public.daily_entry_work_items enable row level security;
 alter table public.monthly_summaries enable row level security;
 
 alter table public.profiles enable row level security;
@@ -130,6 +146,12 @@ drop policy if exists "daily_entries_select_own" on public.daily_entries;
 drop policy if exists "daily_entries_insert_own" on public.daily_entries;
 drop policy if exists "daily_entries_update_own" on public.daily_entries;
 drop policy if exists "daily_entries_delete_own" on public.daily_entries;
+
+
+drop policy if exists "daily_entry_work_items_select_own" on public.daily_entry_work_items;
+drop policy if exists "daily_entry_work_items_insert_own" on public.daily_entry_work_items;
+drop policy if exists "daily_entry_work_items_update_own" on public.daily_entry_work_items;
+drop policy if exists "daily_entry_work_items_delete_own" on public.daily_entry_work_items;
 
 drop policy if exists "monthly_summaries_select_own" on public.monthly_summaries;
 drop policy if exists "monthly_summaries_insert_own" on public.monthly_summaries;
@@ -190,6 +212,67 @@ on public.daily_entries
 for delete
 to authenticated
 using (auth.uid() = user_id);
+
+
+create policy "daily_entry_work_items_select_own"
+on public.daily_entry_work_items
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.daily_entries de
+    where de.id = daily_entry_work_items.daily_entry_id
+      and de.user_id = auth.uid()
+  )
+);
+
+create policy "daily_entry_work_items_insert_own"
+on public.daily_entry_work_items
+for insert
+to authenticated
+with check (
+  exists (
+    select 1
+    from public.daily_entries de
+    where de.id = daily_entry_work_items.daily_entry_id
+      and de.user_id = auth.uid()
+  )
+);
+
+create policy "daily_entry_work_items_update_own"
+on public.daily_entry_work_items
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.daily_entries de
+    where de.id = daily_entry_work_items.daily_entry_id
+      and de.user_id = auth.uid()
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.daily_entries de
+    where de.id = daily_entry_work_items.daily_entry_id
+      and de.user_id = auth.uid()
+  )
+);
+
+create policy "daily_entry_work_items_delete_own"
+on public.daily_entry_work_items
+for delete
+to authenticated
+using (
+  exists (
+    select 1
+    from public.daily_entries de
+    where de.id = daily_entry_work_items.daily_entry_id
+      and de.user_id = auth.uid()
+  )
+);
 
 create policy "monthly_summaries_select_own"
 on public.monthly_summaries

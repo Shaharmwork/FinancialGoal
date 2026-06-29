@@ -7,7 +7,6 @@ export const metadata: Metadata = {
   description: 'A calm ZZP cockpit for weekly work, tax reserve planning, and household outlook.',
   icons: {
     icon: '/icon.svg',
-    apple: '/apple-icon.png',
   },
 }
 

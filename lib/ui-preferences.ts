@@ -8,19 +8,29 @@ interface ConfigurationDraft {
   settings: Settings
 }
 
+export type ReportWorkItemDraft = {
+  id?: string
+  projectName: string
+  hours: string
+  hourlyRate: string
+  invoicedIncome: string
+  lineIndex: number
+}
+
+export type ReportDayFormDraft = {
+  expenses: string
+  hours: string
+  invoicedIncome: string
+  paidIncome: string
+  workItems?: ReportWorkItemDraft[]
+}
+
 interface UserUiPreferences {
   configurationDraft?: ConfigurationDraft
   currentScreen?: Screen
+  dailyLogSelectedDate?: string
   reportDraftEntries?: DailyEntry[]
-  reportDayFormDrafts?: Record<
-    string,
-    {
-      expenses?: string
-      hours?: string
-      invoicedIncome?: string
-      paidIncome?: string
-    }
-  >
+  reportDayFormDrafts?: Record<string, Partial<ReportDayFormDraft>>
 }
 
 type StoredUiPreferences = Record<string, UserUiPreferences>
@@ -76,6 +86,28 @@ export function updateUserCurrentScreen(userId: string, currentScreen: Screen) {
   })
 }
 
+export function getUserDailyLogSelectedDate(userId: string) {
+  const userPreferences = readStoredPreferences()[userId]
+  const selectedDate = userPreferences?.dailyLogSelectedDate
+
+  return typeof selectedDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(selectedDate)
+    ? selectedDate
+    : undefined
+}
+
+export function updateUserDailyLogSelectedDate(userId: string, selectedDate: string) {
+  const storedPreferences = readStoredPreferences()
+  const currentPreferences = storedPreferences[userId] ?? {}
+
+  writeStoredPreferences({
+    ...storedPreferences,
+    [userId]: {
+      ...currentPreferences,
+      dailyLogSelectedDate: selectedDate,
+    },
+  })
+}
+
 export function getUserReportDraftEntries(userId: string): DailyEntry[] | null {
   const userPreferences = readStoredPreferences()[userId]
   const reportDraftEntries = userPreferences?.reportDraftEntries
@@ -120,17 +152,33 @@ export function clearUserReportDraftEntries(userId: string) {
   })
 }
 
+function normalizeReportWorkItemDraft(
+  value: unknown,
+  fallbackLineIndex: number,
+): ReportWorkItemDraft | null {
+  if (typeof value !== 'object' || value === null) {
+    return null
+  }
+
+  const draft = value as Record<string, unknown>
+  const rawLineIndex = draft.lineIndex
+
+  return {
+    id: typeof draft.id === 'string' ? draft.id : undefined,
+    projectName: typeof draft.projectName === 'string' ? draft.projectName : '',
+    hours: typeof draft.hours === 'string' ? draft.hours : '',
+    hourlyRate: typeof draft.hourlyRate === 'string' ? draft.hourlyRate : '',
+    invoicedIncome: typeof draft.invoicedIncome === 'string' ? draft.invoicedIncome : '',
+    lineIndex:
+      typeof rawLineIndex === 'number' && Number.isFinite(rawLineIndex)
+        ? Math.trunc(rawLineIndex)
+        : fallbackLineIndex,
+  }
+}
+
 export function getUserReportDayFormDrafts(
   userId: string,
-): Record<
-  string,
-  {
-    expenses: string
-    hours: string
-    invoicedIncome: string
-    paidIncome: string
-  }
-> {
+): Record<string, ReportDayFormDraft> {
   const userPreferences = readStoredPreferences()[userId]
   const reportDayFormDrafts = userPreferences?.reportDayFormDrafts
 
@@ -138,26 +186,24 @@ export function getUserReportDayFormDrafts(
     return {}
   }
 
-  return Object.entries(reportDayFormDrafts).reduce<
-    Record<
-      string,
-      {
-        expenses: string
-        hours: string
-        invoicedIncome: string
-        paidIncome: string
-      }
-    >
-  >((currentValue, [dateKey, draft]) => {
+  return Object.entries(reportDayFormDrafts).reduce<Record<string, ReportDayFormDraft>>((currentValue, [dateKey, draft]) => {
     if (typeof draft !== 'object' || draft === null) {
       return currentValue
     }
+
+    const workItems = Array.isArray(draft.workItems)
+      ? draft.workItems
+          .map((workItem, index) => normalizeReportWorkItemDraft(workItem, index))
+          .filter((workItem): workItem is ReportWorkItemDraft => workItem !== null)
+          .sort((left, right) => left.lineIndex - right.lineIndex)
+      : undefined
 
     currentValue[dateKey] = {
       expenses: typeof draft.expenses === 'string' ? draft.expenses : '',
       hours: typeof draft.hours === 'string' ? draft.hours : '',
       invoicedIncome: typeof draft.invoicedIncome === 'string' ? draft.invoicedIncome : '',
       paidIncome: typeof draft.paidIncome === 'string' ? draft.paidIncome : '',
+      ...(workItems && workItems.length > 0 ? { workItems } : {}),
     }
 
     return currentValue
@@ -166,15 +212,7 @@ export function getUserReportDayFormDrafts(
 
 export function updateUserReportDayFormDrafts(
   userId: string,
-  reportDayFormDrafts: Record<
-    string,
-    {
-      expenses: string
-      hours: string
-      invoicedIncome: string
-      paidIncome: string
-    }
-  >,
+  reportDayFormDrafts: Record<string, ReportDayFormDraft>,
 ) {
   const storedPreferences = readStoredPreferences()
   const currentPreferences = storedPreferences[userId] ?? {}

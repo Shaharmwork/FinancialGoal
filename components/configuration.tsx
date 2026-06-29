@@ -129,6 +129,7 @@ const TAX_ALREADY_WITHHELD_EXPLANATION =
   "This is the tax already deducted by your employer for that month. You can usually find it on your payslip under wage tax, payroll tax, or a similar tax deduction line.";
 const CONFIG_SCREEN_INTENT_KEY = "configuration-screen-intent";
 const CONFIG_SCREEN_FOCUS_TARGET_KEY = "configuration-screen-focus-target";
+const CONFIG_SCREEN_TARGET_MONTH_KEY = "configuration-screen-target-month";
 
 function parseNumber(value: string) {
   const parsed = Number(value);
@@ -804,7 +805,7 @@ export function Configuration({
         return {
           title: "Detailed reports already exist",
           message:
-            "This month already has detailed daily reports. It cannot be saved as an employment / pre-business month unless those daily reports are removed first.",
+            "This month already has detailed daily reports. Month backfills are only for months without detailed daily entries.",
         };
       }
 
@@ -982,8 +983,26 @@ export function Configuration({
     refreshInvalidSummaryFieldsIfVisible(nextSortedSummaries);
   };
 
-  const addMonthSummary = useCallback(() => {
+  const addMonthSummary = useCallback((targetMonthKey?: string) => {
     resetFormMessage();
+    const normalizedTargetMonthKey =
+      typeof targetMonthKey === "string" ? targetMonthKey : "";
+
+    if (normalizedTargetMonthKey) {
+      const existingTargetIndex = sortedDraftSummaries.findIndex(
+        (summary) => summary.monthKey === normalizedTargetMonthKey,
+      );
+
+      if (existingTargetIndex >= 0) {
+        setPendingMonthFocusRowKey(
+          getSummaryRowKey(
+            sortedDraftSummaries[existingTargetIndex],
+            existingTargetIndex,
+          ),
+        );
+        return;
+      }
+    }
 
     if (unfinishedNewSummary) {
       const blockedAddIssue = {
@@ -1003,11 +1022,9 @@ export function Configuration({
       return;
     }
 
-    const nextMonthKey = getNextBackfillMonthOption(
-      new Date(),
-      sortedDraftSummaries,
-      entryMonthKeys,
-    );
+    const nextMonthKey =
+      normalizedTargetMonthKey ||
+      getNextBackfillMonthOption(new Date(), sortedDraftSummaries, entryMonthKeys);
 
     if (!nextMonthKey) {
       const noAvailableMonthIssue = {
@@ -1017,6 +1034,19 @@ export function Configuration({
       };
       showWarningModal(noAvailableMonthIssue);
       return;
+    }
+
+    if (normalizedTargetMonthKey) {
+      const validationIssue = getMonthValidationIssue({
+        monthKey: normalizedTargetMonthKey,
+      });
+
+      if (validationIssue) {
+        setIsErrorMessage(true);
+        setFormMessage(validationIssue.message);
+        showWarningModal(validationIssue);
+        return;
+      }
     }
 
     const nextSummary: MonthlySummary = {
@@ -1059,6 +1089,9 @@ export function Configuration({
     const focusTarget = window.sessionStorage.getItem(
       CONFIG_SCREEN_FOCUS_TARGET_KEY,
     );
+    const targetMonthKey = window.sessionStorage.getItem(
+      CONFIG_SCREEN_TARGET_MONTH_KEY,
+    );
 
     if (!intent || consumedConfigIntentRef.current === intent) {
       return;
@@ -1067,6 +1100,7 @@ export function Configuration({
     consumedConfigIntentRef.current = intent;
     window.sessionStorage.removeItem(CONFIG_SCREEN_INTENT_KEY);
     window.sessionStorage.removeItem(CONFIG_SCREEN_FOCUS_TARGET_KEY);
+    window.sessionStorage.removeItem(CONFIG_SCREEN_TARGET_MONTH_KEY);
 
     if (
       intent === "complete-setup" &&
@@ -1083,7 +1117,7 @@ export function Configuration({
       });
 
       window.setTimeout(() => {
-        addMonthSummary();
+        addMonthSummary(targetMonthKey ?? undefined);
       }, 180);
     }
   }, [
@@ -1634,7 +1668,7 @@ export function Configuration({
               ref={addMonthButtonRef}
               className="rounded-full bg-muted px-3 py-2 text-sm font-medium text-foreground disabled:cursor-not-allowed disabled:opacity-60"
               disabled={isSaving}
-              onClick={addMonthSummary}
+              onClick={() => addMonthSummary()}
               type="button"
             >
               Add month

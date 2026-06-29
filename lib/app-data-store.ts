@@ -1,12 +1,13 @@
-import { sortMonthlySummaries } from './calculations'
+import { getEntryHours, getEntryInvoicedIncome, sortMonthlySummaries } from './calculations'
 import {
   normalizeEntry,
   normalizeMonthlySummary,
+  normalizeWorkItem,
   normalizeSettings,
   starterStoredState,
 } from './default-state'
 import { getCurrentSession, getSupabaseClient, hasSupabaseConfig } from './supabase'
-import type { DailyEntry, MonthlySummary, Settings } from './types'
+import type { DailyEntry, MonthlySummary, Settings, WorkItem } from './types'
 
 interface RemoteAppData {
   entries: DailyEntry[]
@@ -46,6 +47,17 @@ interface DailyEntryRow {
   source: string | null
   note: string | null
   user_id?: string | null
+}
+
+interface DailyEntryWorkItemRow {
+  id: string
+  daily_entry_id: string
+  project_name: string | null
+  hours: number
+  hourly_rate: number | null
+  invoiced_income: number
+  created_at?: string
+  line_index: number
 }
 
 interface MonthlySummaryRow {
@@ -124,8 +136,21 @@ function hasAnyUserData({
 }
 
 
-function mapEntryFromRow(row: DailyEntryRow): DailyEntry | null {
-  return normalizeEntry({
+function mapWorkItemFromRow(row: DailyEntryWorkItemRow): WorkItem | null {
+  return normalizeWorkItem({
+    dailyEntryId: row.daily_entry_id,
+    hourlyRate: row.hourly_rate,
+    hours: row.hours,
+    id: row.id,
+    invoicedIncome: row.invoiced_income,
+    lineIndex: row.line_index,
+    projectName: row.project_name ?? '',
+  })
+}
+
+function mapEntryFromRow(row: DailyEntryRow, workItems: WorkItem[] = []): DailyEntry | null {
+  const isWorkedEntry = (row.day_status ?? 'worked') === 'worked'
+  const nextEntry = normalizeEntry({
     date: row.date,
     dayStatus: row.day_status,
     expenses: row.expenses,
@@ -135,21 +160,58 @@ function mapEntryFromRow(row: DailyEntryRow): DailyEntry | null {
     note: row.note,
     paidIncome: row.paid_income,
     source: row.source,
+    workItems: isWorkedEntry ? workItems : [],
   })
+
+  if (!nextEntry || !isWorkedEntry || workItems.length === 0) {
+    return nextEntry
+  }
+
+  return {
+    ...nextEntry,
+    hours: getEntryHours(nextEntry),
+    invoicedIncome: getEntryInvoicedIncome(nextEntry),
+  }
 }
 
 function mapEntryToRow(entry: DailyEntry, userId: string) {
+  const isWorkedEntry = (entry.dayStatus ?? 'worked') === 'worked'
+
   return {
     date: entry.date,
     day_status: entry.dayStatus ?? 'worked',
     expenses: entry.expenses,
-    hours: entry.hours,
+    hours: isWorkedEntry ? getEntryHours(entry) : 0,
     id: entry.id,
-    invoiced_income: entry.invoicedIncome,
+    invoiced_income: isWorkedEntry ? getEntryInvoicedIncome(entry) : 0,
     note: entry.note ?? null,
-    paid_income: entry.paidIncome,
+    paid_income: isWorkedEntry ? entry.paidIncome : 0,
     source: entry.source ?? null,
     user_id: userId,
+  }
+}
+
+function getWorkItemsToSave(entry: DailyEntry) {
+  if ((entry.dayStatus ?? 'worked') !== 'worked' || !entry.workItems || entry.workItems.length === 0) {
+    return []
+  }
+
+  return entry.workItems
+    .map((workItem, index) => ({
+      ...workItem,
+      lineIndex: workItem.lineIndex ?? index,
+    }))
+    .sort((left, right) => left.lineIndex - right.lineIndex)
+}
+
+function mapWorkItemToRow(workItem: WorkItem, entryId: string) {
+  return {
+    daily_entry_id: entryId,
+    project_name: workItem.projectName.trim() === '' ? null : workItem.projectName.trim(),
+    hours: workItem.hours,
+    hourly_rate: workItem.hourlyRate,
+    invoiced_income: workItem.invoicedIncome,
+    line_index: workItem.lineIndex,
   }
 }
 
@@ -188,23 +250,47 @@ async function replaceDailyEntries(entries: DailyEntry[]) {
     return
   }
   const userId = await getRequiredUserId()
+  const normalizedEntries = entries.map((entry) => {
+    const isWorkedEntry = (entry.dayStatus ?? 'worked') === 'worked'
+
+    if (!isWorkedEntry) {
+      return {
+        ...entry,
+        hours: 0,
+        invoicedIncome: 0,
+        paidIncome: 0,
+        expenses: entry.expenses,
+        workItems: undefined,
+      }
+    }
+
+    if (!entry.workItems || entry.workItems.length === 0) {
+      return entry
+    }
+
+    return {
+      ...entry,
+      hours: getEntryHours(entry),
+      invoicedIncome: getEntryInvoicedIncome(entry),
+    }
+  })
 
   const existingResult = await supabase.from('daily_entries').select('id')
   if (existingResult.error) {
     throw existingResult.error
   }
 
-  if (entries.length > 0) {
+  if (normalizedEntries.length > 0) {
     const upsertResult = await supabase
       .from('daily_entries')
-      .upsert(entries.map((entry) => mapEntryToRow(entry, userId)), { onConflict: 'id' })
+      .upsert(normalizedEntries.map((entry) => mapEntryToRow(entry, userId)), { onConflict: 'id' })
 
     if (upsertResult.error) {
       throw upsertResult.error
     }
   }
 
-  const nextIds = new Set(entries.map((entry) => entry.id))
+  const nextIds = new Set(normalizedEntries.map((entry) => entry.id))
   const idsToDelete =
     existingResult.data
       ?.map((row) => row.id)
@@ -215,6 +301,32 @@ async function replaceDailyEntries(entries: DailyEntry[]) {
 
     if (deleteResult.error) {
       throw deleteResult.error
+    }
+  }
+
+  const entryIdsToReplace = normalizedEntries.map((entry) => entry.id)
+  if (entryIdsToReplace.length > 0) {
+    const deleteWorkItemsResult = await supabase
+      .from('daily_entry_work_items')
+      .delete()
+      .in('daily_entry_id', entryIdsToReplace)
+
+    if (deleteWorkItemsResult.error) {
+      throw deleteWorkItemsResult.error
+    }
+  }
+
+  const workItemRows = normalizedEntries.flatMap((entry) =>
+    getWorkItemsToSave(entry).map((workItem) => mapWorkItemToRow(workItem, entry.id)),
+  )
+
+  if (workItemRows.length > 0) {
+    const insertWorkItemsResult = await supabase
+      .from('daily_entry_work_items')
+      .insert(workItemRows)
+
+    if (insertWorkItemsResult.error) {
+      throw insertWorkItemsResult.error
     }
   }
 }
@@ -327,9 +439,43 @@ export async function loadRemoteAppData(): Promise<LoadedRemoteAppData> {
     throw profileResult.error
   }
 
+  const entryIds =
+    entriesResult.data
+      ?.map((row) => (row as DailyEntryRow).id)
+      .filter((id): id is string => typeof id === 'string') ?? []
+  const workItemsResult =
+    entryIds.length > 0
+      ? await supabase
+          .from('daily_entry_work_items')
+          .select('*')
+          .in('daily_entry_id', entryIds)
+          .order('daily_entry_id', { ascending: true })
+          .order('line_index', { ascending: true })
+      : null
+
+  if (workItemsResult?.error) {
+    throw workItemsResult.error
+  }
+
+  const workItemsByEntryId = new Map<string, WorkItem[]>()
+  workItemsResult?.data?.forEach((row) => {
+    const workItem = mapWorkItemFromRow(row as DailyEntryWorkItemRow)
+
+    if (!workItem?.dailyEntryId) {
+      return
+    }
+
+    const currentItems = workItemsByEntryId.get(workItem.dailyEntryId) ?? []
+    currentItems.push(workItem)
+    workItemsByEntryId.set(workItem.dailyEntryId, currentItems)
+  })
+
   const remoteEntries =
     entriesResult.data
-      ?.map((row) => mapEntryFromRow(row as DailyEntryRow))
+      ?.map((row) => {
+        const entryRow = row as DailyEntryRow
+        return mapEntryFromRow(entryRow, workItemsByEntryId.get(entryRow.id) ?? [])
+      })
       .filter((entry): entry is DailyEntry => entry !== null) ?? []
 
   const remoteMonthlySummaries = sortMonthlySummaries(
