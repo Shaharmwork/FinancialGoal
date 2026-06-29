@@ -41,6 +41,7 @@ const STAGE_HEIGHT = 844;
 const STAGE_VIEWPORT_PADDING = 16;
 const CONFIG_SCREEN_INTENT_KEY = "configuration-screen-intent";
 const CONFIG_SCREEN_FOCUS_TARGET_KEY = "configuration-screen-focus-target";
+const DASHBOARD_ALERT_PULSE_DISABLED_KEY = "dashboard-alert-pulse-disabled";
 type ProgressStatusKind =
   | "waiting"
   | "setGoal"
@@ -579,6 +580,7 @@ function getHeroValueFontSize(value: string) {
 }
 
 interface DashboardProps {
+  alertPulseSessionKey?: string;
   displayName?: string;
   entries: DailyEntry[];
   isReportsAlertDismissed: boolean;
@@ -594,6 +596,7 @@ interface DashboardProps {
 }
 
 export function Dashboard({
+  alertPulseSessionKey,
   displayName,
   entries,
   isReportsAlertDismissed,
@@ -610,7 +613,8 @@ export function Dashboard({
   const stageScale = useDashboardStageScale();
   const greetingTimeoutRef = useRef<number | null>(null);
   const [isGreetingVisible, setIsGreetingVisible] = useState(false);
-  const [isAlertTrayCollapsed, setIsAlertTrayCollapsed] = useState(false);
+  const [isAlertTrayCollapsed, setIsAlertTrayCollapsed] = useState(true);
+  const [isAlertPulseDisabled, setIsAlertPulseDisabled] = useState(false);
   const [isSetupHiddenForCardView, setIsSetupHiddenForCardView] =
     useState(false);
   const now = new Date();
@@ -680,10 +684,7 @@ export function Dashboard({
     ? {
         kind: "configuration" as const,
         missingReportDateKey:
-          !isBaseConfigurationMissing &&
-          missingPreviousMonthSummaryKeys.length === 0
-            ? earliestMissingHistoricalDay
-            : undefined,
+          !isBaseConfigurationMissing ? earliestMissingHistoricalDay : undefined,
         tooltip: isBaseConfigurationMissing
           ? "Your core setup is incomplete. Add your defaults, financial assumptions, and targets so projections, tax guidance, and progress tracking can work correctly."
           : missingPreviousMonthSummaryKeys.length > 0
@@ -712,6 +713,19 @@ export function Dashboard({
     projectedTakeHome,
     yearlyNetGoal,
   });
+  const pulseDisabledStorageKey = alertPulseSessionKey
+    ? `${DASHBOARD_ALERT_PULSE_DISABLED_KEY}:${alertPulseSessionKey}`
+    : undefined;
+
+  const disableAlertPulseForSession = () => {
+    setIsAlertPulseDisabled(true);
+
+    if (typeof window === "undefined" || !pulseDisabledStorageKey) {
+      return;
+    }
+
+    window.sessionStorage.setItem(pulseDisabledStorageKey, "true");
+  };
 
   const openConfigurationSetupFromAlert = () => {
     if (typeof window !== "undefined") {
@@ -738,10 +752,12 @@ export function Dashboard({
   };
 
   const handleCollapseAlertTray = () => {
+    disableAlertPulseForSession();
     setIsAlertTrayCollapsed(true);
   };
 
   const handleExpandAlertTray = () => {
+    disableAlertPulseForSession();
     setIsSetupHiddenForCardView(false);
     setIsAlertTrayCollapsed(false);
   };
@@ -749,7 +765,7 @@ export function Dashboard({
   const handleSetupLater = () => {
     if (reportsBanner) {
       setIsSetupHiddenForCardView(true);
-      setIsAlertTrayCollapsed(false);
+      setIsAlertTrayCollapsed(true);
       return;
     }
 
@@ -757,8 +773,9 @@ export function Dashboard({
   };
 
   const handleReportsDismiss = () => {
+    disableAlertPulseForSession();
     setIsSetupHiddenForCardView(false);
-    setIsAlertTrayCollapsed(false);
+    setIsAlertTrayCollapsed(true);
     onDismissCurrentMonthReminder();
   };
 
@@ -767,6 +784,24 @@ export function Dashboard({
       setIsSetupHiddenForCardView(false);
     }
   }, [isSetupIncomplete]);
+
+  useEffect(() => {
+    if (!visibleBanner) {
+      setIsAlertPulseDisabled(false);
+      return;
+    }
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    setIsAlertPulseDisabled(
+      pulseDisabledStorageKey
+        ? window.sessionStorage.getItem(pulseDisabledStorageKey) === "true"
+        : false,
+    );
+    setIsAlertTrayCollapsed(true);
+  }, [pulseDisabledStorageKey, visibleBanner?.kind, visibleBanner?.tooltip]);
 
   useEffect(() => {
     if (!shouldShowGreeting) {
@@ -783,7 +818,7 @@ export function Dashboard({
     greetingTimeoutRef.current = window.setTimeout(() => {
       setIsGreetingVisible(false);
       greetingTimeoutRef.current = null;
-    }, 20000);
+    }, 10000);
   }, [onGreetingShown, shouldShowGreeting]);
 
   useEffect(() => {
@@ -865,6 +900,7 @@ export function Dashboard({
                   ? visibleBanner.missingReportDateKey
                   : undefined
               }
+              shouldPulseCollapsedAlert={!isAlertPulseDisabled}
             />
           ) : null}
 
@@ -1158,6 +1194,7 @@ function DashboardSupportTray({
   onLaterSetup,
   onOpenConfigurationSetup,
   reportTargetDateKey,
+  shouldPulseCollapsedAlert,
 }: {
   bannerKind: "configuration" | "reports";
   infoTooltip: string;
@@ -1170,6 +1207,7 @@ function DashboardSupportTray({
   onLaterSetup: () => void;
   onOpenConfigurationSetup: () => void;
   reportTargetDateKey?: string;
+  shouldPulseCollapsedAlert: boolean;
 }) {
   const [isInfoOpen, setIsInfoOpen] = useState(false);
   const infoButtonRef = useRef<HTMLButtonElement>(null);
@@ -1201,9 +1239,12 @@ function DashboardSupportTray({
       ? "Projection incomplete"
       : "Setup incomplete"
     : "Projection compromised";
+  const shouldReportMissingHistory =
+    (isHistoryBanner || isPartialHistoryBanner) &&
+    reportTargetDateKey !== undefined;
   const actionLabel = isConfigurationBanner
     ? isHistoryBanner || isPartialHistoryBanner
-      ? isPartialHistoryBanner
+      ? shouldReportMissingHistory
         ? "Report Missing Days"
         : "Update History"
       : "Complete Setup"
@@ -1211,7 +1252,7 @@ function DashboardSupportTray({
   const secondaryLabel = isConfigurationBanner ? "Later" : "Dismiss";
   const secondarySubLabel = isConfigurationBanner ? "" : "This session";
   const action = isConfigurationBanner
-    ? isPartialHistoryBanner
+    ? shouldReportMissingHistory
       ? () => onFillMissingDays(reportTargetDateKey)
       : isHistoryBanner
         ? onAddPreviousMonths
@@ -1220,6 +1261,7 @@ function DashboardSupportTray({
   const secondaryAction = isConfigurationBanner
     ? onLaterSetup
     : onDismissCurrentMonthReminder;
+  const shouldPulseCollapsed = isCollapsed && shouldPulseCollapsedAlert;
 
   useEffect(() => {
     if (isCollapsed) {
@@ -1276,7 +1318,9 @@ function DashboardSupportTray({
     >
       <button
         aria-label={isCollapsed ? `Expand ${title}` : `Collapse ${title}`}
-        className="absolute left-0 top-1/2 z-[3] flex items-center justify-center rounded-full border border-[#f1ba6b]/45 bg-[#0f0b08] text-[#ffd791] shadow-[0_0_16px_rgba(255,141,45,0.18),0_8px_18px_rgba(0,0,0,0.34)] transition hover:bg-[#19120d]"
+        className={`absolute left-0 top-1/2 z-[3] flex items-center justify-center rounded-full border border-[#f1ba6b]/45 bg-[#0f0b08] text-[#ffd791] shadow-[0_0_16px_rgba(255,141,45,0.18),0_8px_18px_rgba(0,0,0,0.34)] transition hover:bg-[#19120d] ${
+          shouldPulseCollapsed ? "dashboard-alert-collapsed-pulse-trigger" : ""
+        }`}
         onClick={isCollapsed ? onExpand : onCollapse}
         style={{
           width: DASHBOARD_POS.tray.collapseButtonSize,
@@ -1330,7 +1374,9 @@ function DashboardSupportTray({
       ) : null}
 
       <div
-        className="relative ml-4 flex h-full items-center overflow-hidden rounded-[999px] border border-[#ffd15b] bg-[radial-gradient(circle_at_top,rgba(255,218,85,0.22),transparent_42%),linear-gradient(180deg,rgba(32,20,13,0.98),rgba(13,8,7,0.98))] px-4 shadow-[0_0_2px_rgba(255,251,202,0.72),0_0_2px_rgba(255,202,38,0.62),0_0_44px_rgba(255,119,35,0.38),0_14px_30px_rgba(0,0,0,0.36)]"
+        className={`relative ml-4 flex h-full items-center overflow-hidden rounded-[999px] border border-[#ffd15b] bg-[radial-gradient(circle_at_top,rgba(255,218,85,0.22),transparent_42%),linear-gradient(180deg,rgba(32,20,13,0.98),rgba(13,8,7,0.98))] px-4 shadow-[0_0_2px_rgba(255,251,202,0.72),0_0_2px_rgba(255,202,38,0.62),0_0_44px_rgba(255,119,35,0.38),0_14px_30px_rgba(0,0,0,0.36)] ${
+          shouldPulseCollapsed ? "dashboard-alert-collapsed-pulse-body" : ""
+        }`}
         style={{
           transform: getTrayPartTransform(DASHBOARD_POS.tray.parts.body),
         }}
@@ -1338,7 +1384,9 @@ function DashboardSupportTray({
         <span className="pointer-events-none absolute inset-[1px] rounded-[999px] border border-[#fff4ad]/40 shadow-[inset_0_0_3px_rgba(255,201,55,0.18),0_0_18px_rgba(255,217,82,0.48)]" />
 
         <div
-          className="relative flex shrink-0 items-center justify-center rounded-full border border-[#ff7a27] bg-[radial-gradient(circle,rgba(255,144,35,0.62)_0%,rgba(255,89,22,0.38)_4%,rgba(149,22,12,0.24)_5%)] text-[#ffc11e] shadow-[0_0_2px_rgba(255,128,48,0.9),0_0_5px_rgba(255,38,20,0.82),0_0_10px_rgba(208,18,12,0.56)]"
+          className={`relative flex shrink-0 items-center justify-center rounded-full border border-[#ff7a27] bg-[radial-gradient(circle,rgba(255,144,35,0.62)_0%,rgba(255,89,22,0.38)_4%,rgba(149,22,12,0.24)_5%)] text-[#ffc11e] shadow-[0_0_2px_rgba(255,128,48,0.9),0_0_5px_rgba(255,38,20,0.82),0_0_10px_rgba(208,18,12,0.56)] ${
+            shouldPulseCollapsed ? "dashboard-alert-collapsed-pulse-icon" : ""
+          }`}
           style={{
             width: DASHBOARD_POS.tray.alertIconSize,
             height: DASHBOARD_POS.tray.alertIconSize,
@@ -1567,6 +1615,100 @@ function DashboardBannerAnimationStyles() {
           opacity: 1;
           transform: translateX(0) scale(1);
         }
+      }
+
+      @keyframes dashboardAlertPulseTrigger {
+        0%,
+        12%,
+        24%,
+        36%,
+        100% {
+          scale: 1;
+          border-color: rgba(241, 186, 107, 0.45);
+          color: #ffd791;
+          box-shadow:
+            0 0 16px rgba(255, 141, 45, 0.18),
+            0 8px 18px rgba(0, 0, 0, 0.34);
+        }
+        6%,
+        18%,
+        30% {
+          scale: 1.22;
+          border-color: rgba(255, 54, 42, 0.95);
+          color: #fff1df;
+          box-shadow:
+            0 0 3px rgba(255, 245, 236, 0.9),
+            0 0 18px rgba(255, 43, 34, 0.94),
+            0 0 36px rgba(255, 21, 21, 0.66),
+            0 10px 24px rgba(0, 0, 0, 0.38);
+        }
+      }
+
+      @keyframes dashboardAlertPulseBody {
+        0%,
+        12%,
+        24%,
+        36%,
+        100% {
+          scale: 1;
+          border-color: #ffd15b;
+          filter: brightness(1);
+          box-shadow:
+            0 0 2px rgba(255, 251, 202, 0.72),
+            0 0 2px rgba(255, 202, 38, 0.62),
+            0 0 44px rgba(255, 119, 35, 0.38),
+            0 14px 30px rgba(0, 0, 0, 0.36);
+        }
+        6%,
+        18%,
+        30% {
+          scale: 1.12;
+          border-color: #ff3327;
+          filter: brightness(1.18);
+          box-shadow:
+            0 0 2px rgba(255, 245, 236, 0.88),
+            0 0 14px rgba(255, 47, 34, 0.92),
+            0 0 36px rgba(255, 24, 24, 0.62),
+            0 0 58px rgba(255, 67, 41, 0.36),
+            0 16px 34px rgba(0, 0, 0, 0.42);
+        }
+      }
+
+      @keyframes dashboardAlertPulseIcon {
+        0%,
+        12%,
+        24%,
+        36%,
+        100% {
+          scale: 1;
+          box-shadow:
+            0 0 2px rgba(255, 128, 48, 0.9),
+            0 0 5px rgba(255, 38, 20, 0.82),
+            0 0 10px rgba(208, 18, 12, 0.56);
+        }
+        6%,
+        18%,
+        30% {
+          scale: 1.18;
+          box-shadow:
+            0 0 3px rgba(255, 245, 236, 0.86),
+            0 0 18px rgba(255, 52, 37, 0.96),
+            0 0 34px rgba(255, 20, 20, 0.72);
+        }
+      }
+
+      .dashboard-alert-collapsed-pulse-trigger {
+        animation: dashboardAlertPulseTrigger 10s ease-in-out infinite;
+      }
+
+      .dashboard-alert-collapsed-pulse-body {
+        animation: dashboardAlertPulseBody 10s ease-in-out infinite;
+        transform-origin: left center;
+      }
+
+      .dashboard-alert-collapsed-pulse-icon {
+        animation: dashboardAlertPulseIcon 10s ease-in-out infinite;
+        transform-origin: center;
       }
 
       .dashboard-gold-label {
@@ -1917,7 +2059,7 @@ function YearlyPlanningCard({
                     <TaxSupportItem
                       icon={TaxReserveIcon}
                       id="taxReserved"
-                      label="Tax reserved so far"
+                      label="Tax reserved before this month"
                       value={
                         monthReservedTax === undefined
                           ? "—"
@@ -2232,6 +2374,7 @@ function BottomNavItem({
             alt=""
             className="rounded-[inherit] object-fill"
             fill
+            priority
             sizes="100px"
             src={highlight}
           />

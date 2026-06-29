@@ -10,6 +10,26 @@ function roundHours(value: number) {
   return Math.round((value + Number.EPSILON) * 10) / 10
 }
 
+function sumWorkItems(entry: DailyEntry, field: 'hours' | 'invoicedIncome') {
+  if ((entry.dayStatus ?? 'worked') !== 'worked') {
+    return undefined
+  }
+
+  if (!entry.workItems || entry.workItems.length === 0) {
+    return undefined
+  }
+
+  return entry.workItems.reduce((total, workItem) => total + workItem[field], 0)
+}
+
+export function getEntryHours(entry: DailyEntry) {
+  return sumWorkItems(entry, 'hours') ?? entry.hours
+}
+
+export function getEntryInvoicedIncome(entry: DailyEntry) {
+  return sumWorkItems(entry, 'invoicedIncome') ?? entry.invoicedIncome
+}
+
 function pad(value: number) {
   return value.toString().padStart(2, '0')
 }
@@ -50,6 +70,24 @@ export function getCurrentMonthRange(today = new Date()) {
 function isWeekday(date: Date) {
   const day = date.getDay()
   return day !== 0 && day !== 6
+}
+
+function getHandledDateKeys(entries: DailyEntry[], extraHandledDateKeys: Iterable<string> = []) {
+  const handledDateKeys = new Set(entries.map((entry) => entry.date))
+
+  for (const dateKey of extraHandledDateKeys) {
+    handledDateKeys.add(dateKey)
+  }
+
+  return handledDateKeys
+}
+
+function getSummaryMonthKeys(monthlySummaries: MonthlySummary[], year: number) {
+  return new Set(
+    monthlySummaries
+      .filter((summary) => summary.monthKey.startsWith(`${year}-`))
+      .map((summary) => summary.monthKey),
+  )
 }
 
 function isPositiveNumber(value: number | null) {
@@ -171,41 +209,86 @@ export function getEarliestMissingPreviousMonthWeekday(
     return undefined
   }
 
+  const currentMonthKey = toMonthKey(today)
+
+  return getMissingReportDateKeys(entries, monthlySummaries, today).find(
+    (dateKey) => dateKey.slice(0, 7) < currentMonthKey,
+  )
+}
+
+export function getMissingReportDateKeys(
+  entries: DailyEntry[],
+  monthlySummaries: MonthlySummary[],
+  today = new Date(),
+  extraHandledDateKeys: Iterable<string> = [],
+) {
   const currentYear = today.getFullYear()
-  const summaryMonthKeys = new Set(
-    monthlySummaries
-      .filter((summary) => summary.monthKey.startsWith(`${currentYear}-`))
-      .map((summary) => summary.monthKey),
-  )
-  const entryDays = new Set(entries.map((entry) => entry.date))
-  const entryMonthKeys = new Set(
-    entries
-      .filter((entry) => entry.date.startsWith(`${currentYear}-`))
-      .map((entry) => entry.date.slice(0, 7)),
-  )
+  const currentMonthKey = toMonthKey(today)
+  const todayKey = toDateKey(today)
+  const summaryMonthKeys = getSummaryMonthKeys(monthlySummaries, currentYear)
+  const handledDateKeys = getHandledDateKeys(entries, extraHandledDateKeys)
+  const cursor = new Date(currentYear, 0, 1)
+  const missingDateKeys: string[] = []
 
-  for (let monthIndex = 0; monthIndex < today.getMonth(); monthIndex += 1) {
-    const monthKey = `${currentYear}-${pad(monthIndex + 1)}`
+  while (toDateKey(cursor) < todayKey) {
+    const dateKey = toDateKey(cursor)
+    const monthKey = dateKey.slice(0, 7)
+    const isPreviousMonthCoveredBySummary =
+      monthKey < currentMonthKey && summaryMonthKeys.has(monthKey)
 
-    if (summaryMonthKeys.has(monthKey) || !entryMonthKeys.has(monthKey)) {
-      continue
+    if (
+      !isPreviousMonthCoveredBySummary &&
+      isWeekday(cursor) &&
+      !handledDateKeys.has(dateKey)
+    ) {
+      missingDateKeys.push(dateKey)
     }
 
-    const cursor = new Date(currentYear, monthIndex, 1)
-    const monthEnd = new Date(currentYear, monthIndex + 1, 0)
-
-    while (cursor <= monthEnd) {
-      const dateKey = toDateKey(cursor)
-
-      if (isWeekday(cursor) && !entryDays.has(dateKey)) {
-        return dateKey
-      }
-
-      cursor.setDate(cursor.getDate() + 1)
-    }
+    cursor.setDate(cursor.getDate() + 1)
   }
 
-  return undefined
+  return missingDateKeys
+}
+
+export function getEarliestMissingReportWeekday(
+  entries: DailyEntry[],
+  monthlySummaries: MonthlySummary[],
+  today = new Date(),
+  extraHandledDateKeys: Iterable<string> = [],
+) {
+  return getMissingReportDateKeys(
+    entries,
+    monthlySummaries,
+    today,
+    extraHandledDateKeys,
+  )[0]
+}
+
+export function getMissingFullReportMonthKeys(
+  entries: DailyEntry[],
+  monthlySummaries: MonthlySummary[],
+  today = new Date(),
+  extraHandledDateKeys: Iterable<string> = [],
+) {
+  if (today.getMonth() === 0) {
+    return []
+  }
+
+  const currentYear = today.getFullYear()
+  const summaryMonthKeys = getSummaryMonthKeys(monthlySummaries, currentYear)
+  const handledMonthKeys = new Set<string>()
+
+  getHandledDateKeys(entries, extraHandledDateKeys).forEach((dateKey) => {
+    if (dateKey.startsWith(`${currentYear}-`)) {
+      handledMonthKeys.add(dateKey.slice(0, 7))
+    }
+  })
+
+  return Array.from({ length: today.getMonth() }, (_, index) => {
+    return `${currentYear}-${pad(index + 1)}`
+  }).filter((monthKey) => {
+    return !summaryMonthKeys.has(monthKey) && !handledMonthKeys.has(monthKey)
+  })
 }
 
 export function getCurrentMonthWeekdayCoverage(
@@ -292,7 +375,17 @@ export function filterEntriesByRange(entries: DailyEntry[], start: Date, end: Da
 type EntryField = 'hours' | 'invoicedIncome' | 'paidIncome' | 'expenses'
 
 function sumEntries(entries: DailyEntry[], field: EntryField) {
-  return entries.reduce((total, entry) => total + entry[field], 0)
+  return entries.reduce((total, entry) => {
+    if (field === 'hours') {
+      return total + getEntryHours(entry)
+    }
+
+    if (field === 'invoicedIncome') {
+      return total + getEntryInvoicedIncome(entry)
+    }
+
+    return total + entry[field]
+  }, 0)
 }
 
 function getMonthProgress(today: Date, endOfMonth: Date) {
@@ -422,7 +515,7 @@ export function getPlanningConsistency(settings: Settings, today = new Date()) {
 function getUniqueWorkDays(entries: DailyEntry[]) {
   return new Set(
     entries
-      .filter((entry) => (entry.dayStatus ?? 'worked') === 'worked' && entry.hours > 0)
+      .filter((entry) => (entry.dayStatus ?? 'worked') === 'worked' && getEntryHours(entry) > 0)
       .map((entry) => entry.date),
   ).size
 }

@@ -23,6 +23,7 @@ import { starterStoredState } from "@/lib/default-state";
 import {
   clearUserReportDayFormDrafts,
   clearUserReportDraftEntries,
+  getUserCurrentScreen,
   getUserReportDraftEntries,
   updateUserCurrentScreen,
   updateUserReportDraftEntries,
@@ -34,16 +35,76 @@ import {
   signInWithEmailPassword,
   signOutFromSupabase,
 } from "@/lib/supabase";
-import type { DailyEntry, MonthlySummary, Screen, Settings } from "@/lib/types";
+import type { DailyEntry, MonthlySummary, Screen, Settings, WorkItem } from "@/lib/types";
 
 const navItems: Array<{ id: Screen; label: string }> = [
   { id: "dashboard", label: "Home" },
   { id: "daily-log", label: "Report" },
   { id: "configuration", label: "Configuration" },
 ];
+const CONFIG_SCREEN_INTENT_KEY = "configuration-screen-intent";
+const CONFIG_SCREEN_FOCUS_TARGET_KEY = "configuration-screen-focus-target";
+const CONFIG_SCREEN_TARGET_MONTH_KEY = "configuration-screen-target-month";
+const DASHBOARD_ALERT_LOGIN_SESSION_KEY = "dashboard-alert-login-session";
+
+function createDashboardAlertLoginSessionId() {
+  if (typeof window !== "undefined" && window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function getDashboardAlertLoginSessionKey(userId: string) {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+
+  const storedValue = window.sessionStorage.getItem(
+    DASHBOARD_ALERT_LOGIN_SESSION_KEY,
+  );
+
+  if (storedValue) {
+    try {
+      const parsedValue = JSON.parse(storedValue) as {
+        id?: string;
+        userId?: string;
+      };
+
+      if (parsedValue.userId === userId && parsedValue.id) {
+        return `${userId}:${parsedValue.id}`;
+      }
+    } catch {
+      // Replace malformed session metadata below.
+    }
+  }
+
+  const nextValue = {
+    id: createDashboardAlertLoginSessionId(),
+    userId,
+  };
+
+  window.sessionStorage.setItem(
+    DASHBOARD_ALERT_LOGIN_SESSION_KEY,
+    JSON.stringify(nextValue),
+  );
+
+  return `${userId}:${nextValue.id}`;
+}
+
+function clearDashboardAlertLoginSessionKey() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.sessionStorage.removeItem(DASHBOARD_ALERT_LOGIN_SESSION_KEY);
+}
 
 function cloneEntries(entries: DailyEntry[]) {
-  return entries.map((entry) => ({ ...entry }));
+  return entries.map((entry) => ({
+    ...entry,
+    workItems: entry.workItems?.map((workItem) => ({ ...workItem })),
+  }));
 }
 
 function removeEntryByDate(entries: DailyEntry[], dateKey: string) {
@@ -54,6 +115,39 @@ function getComparableEntries(entries: DailyEntry[]) {
   return [...entries].sort((left, right) =>
     left.date.localeCompare(right.date),
   );
+}
+
+function getComparableWorkItems(workItems: WorkItem[] | undefined) {
+  return [...(workItems ?? [])].sort((left, right) => {
+    const lineComparison = left.lineIndex - right.lineIndex;
+
+    if (lineComparison !== 0) {
+      return lineComparison;
+    }
+
+    return left.projectName.localeCompare(right.projectName);
+  });
+}
+
+function areWorkItemsEqual(left: WorkItem[] | undefined, right: WorkItem[] | undefined) {
+  const comparableLeft = getComparableWorkItems(left);
+  const comparableRight = getComparableWorkItems(right);
+
+  if (comparableLeft.length !== comparableRight.length) {
+    return false;
+  }
+
+  return comparableLeft.every((leftWorkItem, index) => {
+    const rightWorkItem = comparableRight[index];
+
+    return (
+      leftWorkItem.projectName === rightWorkItem.projectName &&
+      leftWorkItem.hours === rightWorkItem.hours &&
+      leftWorkItem.hourlyRate === rightWorkItem.hourlyRate &&
+      leftWorkItem.invoicedIncome === rightWorkItem.invoicedIncome &&
+      leftWorkItem.lineIndex === rightWorkItem.lineIndex
+    );
+  });
 }
 
 function areEntriesEqual(left: DailyEntry[], right: DailyEntry[]) {
@@ -76,10 +170,16 @@ function areEntriesEqual(left: DailyEntry[], right: DailyEntry[]) {
       leftEntry.paidIncome === rightEntry.paidIncome &&
       leftEntry.expenses === rightEntry.expenses &&
       (leftEntry.note ?? "") === (rightEntry.note ?? "") &&
-      (leftEntry.source ?? "") === (rightEntry.source ?? "")
+      (leftEntry.source ?? "") === (rightEntry.source ?? "") &&
+      areWorkItemsEqual(leftEntry.workItems, rightEntry.workItems)
     );
   });
 }
+
+type PersistedEntriesSnapshot = {
+  entries: DailyEntry[];
+  userId: string;
+};
 
 function hasFutureDatedEntries(entries: DailyEntry[], todayDateKey: string) {
   return entries.some((entry) => entry.date > todayDateKey);
@@ -145,6 +245,9 @@ export default function Home() {
   );
   const [hasCheckedSession, setHasCheckedSession] = useState(false);
   const [hasLoadedRemoteState, setHasLoadedRemoteState] = useState(false);
+  const [loadedRemoteUserId, setLoadedRemoteUserId] = useState<string | null>(
+    null,
+  );
   const [displayName, setDisplayName] = useState<string | undefined>(undefined);
   const [settingsFocusRequest, setSettingsFocusRequest] = useState(0);
   const [backfillFocusRequest, setBackfillFocusRequest] = useState(0);
@@ -159,6 +262,8 @@ export default function Home() {
   const [shouldShowDashboardGreeting, setShouldShowDashboardGreeting] =
     useState(false);
   const [session, setSession] = useState<Session | null>(null);
+  const [dashboardAlertPulseSessionKey, setDashboardAlertPulseSessionKey] =
+    useState<string | undefined>(undefined);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [isUnsavedReportModalOpen, setIsUnsavedReportModalOpen] =
@@ -190,11 +295,17 @@ export default function Home() {
     useRef<ConfigurationNavigationHandlers | null>(null);
   const dailyLogNavigationHandlersRef =
     useRef<DailyLogNavigationHandlers | null>(null);
+  const entriesRef = useRef(entries);
+  const lastPersistedEntriesRef = useRef<PersistedEntriesSnapshot | null>(null);
   const hasUnsavedReportEntryChanges =
     reportDraftEntries !== null &&
     !areEntriesEqual(reportDraftEntries, entries);
   const hasUnsavedReportChanges =
     hasUnsavedReportEntryChanges || hasUnsavedReportFieldDrafts;
+
+  useEffect(() => {
+    entriesRef.current = entries;
+  }, [entries]);
 
   useEffect(() => {
     let isActive = true;
@@ -270,12 +381,17 @@ export default function Home() {
   useEffect(() => {
     if (!hasCheckedSession || !session) {
       setHasLoadedRemoteState(false);
+      setLoadedRemoteUserId(null);
       setDisplayName(undefined);
+      lastPersistedEntriesRef.current = null;
       return;
     }
 
     let isActive = true;
+    const userId = session.user.id;
     setHasLoadedRemoteState(false);
+    setLoadedRemoteUserId(null);
+    lastPersistedEntriesRef.current = null;
 
     void loadRemoteAppData()
       .then((remoteData) => {
@@ -283,11 +399,16 @@ export default function Home() {
           return;
         }
 
+        lastPersistedEntriesRef.current = {
+          entries: cloneEntries(remoteData.entries),
+          userId,
+        };
         setEntries(remoteData.entries);
         setMonthlySummaries(remoteData.monthlySummaries);
         setSettings(remoteData.settings);
         setDisplayName(remoteData.displayName);
         setIsReportsAlertDismissedForSession(false);
+        setLoadedRemoteUserId(userId);
         setHasLoadedRemoteState(true);
       })
       .catch((error) => {
@@ -296,7 +417,12 @@ export default function Home() {
           return;
         }
 
+        lastPersistedEntriesRef.current = {
+          entries: cloneEntries(entriesRef.current),
+          userId,
+        };
         setDisplayName(undefined);
+        setLoadedRemoteUserId(userId);
         setHasLoadedRemoteState(true);
       });
 
@@ -309,21 +435,31 @@ export default function Home() {
     const userId = session?.user?.id;
 
     if (!userId) {
+      if (!hasCheckedSession) {
+        return;
+      }
+
+      clearDashboardAlertLoginSessionKey();
+      setDashboardAlertPulseSessionKey(undefined);
       setIsReportsAlertDismissedForSession(false);
       setShouldShowDashboardGreeting(false);
       setCurrentScreen("dashboard");
       setReportDraftEntries(null);
       setHasHydratedReportDraftEntries(false);
       setHasUnsavedReportFieldDrafts(false);
+      setLoadedRemoteUserId(null);
+      lastPersistedEntriesRef.current = null;
       return;
     }
 
+    setDashboardAlertPulseSessionKey(getDashboardAlertLoginSessionKey(userId));
     setIsReportsAlertDismissedForSession(false);
     setShouldShowDashboardGreeting(true);
 
-    setCurrentScreen("dashboard");
-    updateUserCurrentScreen(userId, "dashboard");
-  }, [session]);
+    const restoredScreen = getUserCurrentScreen(userId) ?? "dashboard";
+    setCurrentScreen(restoredScreen);
+    updateUserCurrentScreen(userId, restoredScreen);
+  }, [hasCheckedSession, session]);
 
   useEffect(() => {
     const userId = session?.user?.id;
@@ -338,23 +474,41 @@ export default function Home() {
   useEffect(() => {
     const userId = session?.user?.id;
 
-    if (!userId || !hasLoadedRemoteState) {
+    if (!userId || !hasLoadedRemoteState || loadedRemoteUserId !== userId) {
       return;
     }
 
     setReportDraftEntries(getUserReportDraftEntries(userId));
     setHasHydratedReportDraftEntries(true);
-  }, [hasLoadedRemoteState, session]);
+  }, [hasLoadedRemoteState, loadedRemoteUserId, session]);
 
   useEffect(() => {
-    if (!hasLoadedRemoteState) {
+    const userId = session?.user?.id;
+
+    if (!userId || !hasLoadedRemoteState || loadedRemoteUserId !== userId) {
       return;
     }
 
-    void saveDailyEntriesToSupabase(entries).catch((error) => {
-      console.error("[Financial Goal] Failed to save daily entries.", error);
-    });
-  }, [entries, hasLoadedRemoteState]);
+    const lastPersistedEntries = lastPersistedEntriesRef.current;
+
+    if (
+      lastPersistedEntries?.userId === userId &&
+      areEntriesEqual(entries, lastPersistedEntries.entries)
+    ) {
+      return;
+    }
+
+    void saveDailyEntriesToSupabase(entries)
+      .then(() => {
+        lastPersistedEntriesRef.current = {
+          entries: cloneEntries(entries),
+          userId,
+        };
+      })
+      .catch((error) => {
+        console.error("[Financial Goal] Failed to save daily entries.", error);
+      });
+  }, [entries, hasLoadedRemoteState, loadedRemoteUserId, session]);
 
   useEffect(() => {
     const userId = session?.user?.id;
@@ -579,10 +733,30 @@ export default function Home() {
     setCurrentScreen("configuration");
   }, []);
 
-  const handleFillMissingDays = useCallback((targetDateKey?: string) => {
-    setFillMissingDayTargetDateKey(targetDateKey);
-    setFillMissingDaysRequest((currentValue) => currentValue + 1);
-    setCurrentScreen("daily-log");
+  const handleFillMissingDays = useCallback(
+    (targetDateKey?: string) => {
+      setReportDraftEntries((previousEntries) =>
+        previousEntries ?? cloneEntries(entries),
+      );
+      setFillMissingDayTargetDateKey(targetDateKey);
+      setFillMissingDaysRequest((currentValue) => currentValue + 1);
+      setCurrentScreen("daily-log");
+    },
+    [entries],
+  );
+
+  const handleBackfillMissingMonth = useCallback((monthKey: string) => {
+    if (typeof window !== "undefined") {
+      window.sessionStorage.setItem(CONFIG_SCREEN_INTENT_KEY, "update-history");
+      window.sessionStorage.setItem(
+        CONFIG_SCREEN_FOCUS_TARGET_KEY,
+        "add-month",
+      );
+      window.sessionStorage.setItem(CONFIG_SCREEN_TARGET_MONTH_KEY, monthKey);
+    }
+
+    setBackfillFocusRequest((currentValue) => currentValue + 1);
+    setCurrentScreen("configuration");
   }, []);
 
   const handleDismissCurrentMonthReminder = useCallback(() => {
@@ -678,6 +852,7 @@ export default function Home() {
   if (currentScreen === "dashboard") {
     activeScreen = (
       <Dashboard
+        alertPulseSessionKey={dashboardAlertPulseSessionKey}
         displayName={displayName}
         entries={entries}
         isReportsAlertDismissed={isReportsAlertDismissedForSession}
@@ -704,6 +879,7 @@ export default function Home() {
         onRegisterNavigationHandlers={handleRegisterDailyLogNavigationHandlers}
         onSaveEntries={handleSaveReportEntries}
         onUnsavedDayInputDraftsChange={setHasUnsavedReportFieldDrafts}
+        onBackfillMissingMonth={handleBackfillMissingMonth}
         reportResetRequest={reportResetRequest}
         savedEntries={entries}
         settings={settings}

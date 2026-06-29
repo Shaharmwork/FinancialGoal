@@ -2,6 +2,16 @@ export type Screen = 'dashboard' | 'daily-log' | 'configuration'
 export type DayStatus = 'worked' | 'no_work' | 'vacation'
 export type MonthType = 'business' | 'employment'
 
+export interface WorkItem {
+  id?: string
+  dailyEntryId?: string
+  projectName: string
+  hours: number
+  hourlyRate: number | null
+  invoicedIncome: number
+  lineIndex: number
+}
+
 export interface DailyEntry {
   id: string
   date: string
@@ -12,6 +22,7 @@ export interface DailyEntry {
   expenses: number
   note?: string
   source?: string
+  workItems?: WorkItem[]
 }
 
 export interface MonthlySummary {

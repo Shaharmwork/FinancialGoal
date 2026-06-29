@@ -1,4 +1,4 @@
-import type { DailyEntry, MonthlySummary, Screen, Settings, StoredAppState } from './types'
+import type { DailyEntry, MonthlySummary, Screen, Settings, StoredAppState, WorkItem } from './types'
 
 export const STORAGE_KEY = 'financial-goal-mvp-state'
 
@@ -104,6 +104,34 @@ function readMonthType(value: unknown) {
   return value === 'employment' ? 'employment' : 'business'
 }
 
+export function normalizeWorkItem(value: unknown, fallbackLineIndex = 0): WorkItem | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const hours = readNumber(value.hours, NaN)
+  const invoicedIncome = readNumber(value.invoicedIncome ?? value.invoiced_income, NaN)
+  const lineIndex = readNumber(value.lineIndex ?? value.line_index, fallbackLineIndex)
+
+  if (
+    !Number.isFinite(hours) ||
+    !Number.isFinite(invoicedIncome) ||
+    !Number.isFinite(lineIndex)
+  ) {
+    return null
+  }
+
+  return {
+    id: readString(value.id),
+    dailyEntryId: readString(value.dailyEntryId ?? value.daily_entry_id),
+    projectName: readString(value.projectName ?? value.project_name) ?? '',
+    hours,
+    hourlyRate: readNullableNumber(value.hourlyRate ?? value.hourly_rate),
+    invoicedIncome,
+    lineIndex: Math.trunc(lineIndex),
+  }
+}
+
 function normalizeScreen(value: unknown): Screen {
   return value === 'dashboard' || value === 'daily-log' || value === 'configuration'
     ? value
@@ -154,6 +182,13 @@ export function normalizeEntry(value: unknown): DailyEntry | null {
     return null
   }
 
+  const workItems = Array.isArray(value.workItems)
+    ? value.workItems
+        .map((workItem, index) => normalizeWorkItem(workItem, index))
+        .filter((workItem): workItem is WorkItem => workItem !== null)
+        .sort((left, right) => left.lineIndex - right.lineIndex)
+    : undefined
+
   return {
     id,
     date,
@@ -167,6 +202,7 @@ export function normalizeEntry(value: unknown): DailyEntry | null {
     expenses: readNumber(value.expenses ?? value.expense, 0),
     note: readString(value.note),
     source: readString(value.source),
+    ...(workItems && workItems.length > 0 ? { workItems } : {}),
   }
 }
 
