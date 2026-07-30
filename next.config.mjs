@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  allowedDevOrigins: ['192.168.178.202', '10.195.1.32'],
+  allowedDevOrigins: ['192.168.178.202'],
   devIndicators: {
     position: 'top-left',
   },

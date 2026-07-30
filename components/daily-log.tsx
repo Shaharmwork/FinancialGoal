@@ -738,8 +738,18 @@ export function DailyLog({
     },
     settings,
   )
-  const suggestedPaidIncome = isWorkItemMode ? workItemDraftTotals.invoicedIncome : flatDraftInvoiceAmount
-  const paidIncomePlaceholder = suggestedPaidIncome > 0 ? suggestedPaidIncome.toFixed(2) : '0'
+  const paidIncomeInvoiceAmount = isWorkItemMode
+    ? workItemDraftTotals.invoicedIncome
+    : flatDraftInvoiceAmount
+  const canUseInvoicedAsPaid =
+    paidIncomeInvoiceAmount > 0 &&
+    !isSelectedDayMarkedNoWork &&
+    !isSelectedDayMarkedVacation &&
+    !isSelectedMonthEmployment
+  const useInvoicedAsPaidLabel =
+    paidIncomeInvoiceAmount > 0
+      ? `Use invoiced amount (${formatCurrencyPrecise(paidIncomeInvoiceAmount)})`
+      : 'Use invoiced amount'
   const selectedWorkedHours = selectedEntryDraft.hours
   const selectedWorkedInvoicedIncome = selectedEntryDraft.invoicedIncome
   const selectedWorkedPaidIncome = selectedEntryDraft.paidIncome
@@ -1078,6 +1088,17 @@ export function DailyLog({
 
   const handleRemoveProjectRow = (lineIndex: number) => {
     updateWorkItemDrafts(currentWorkItems.filter((workItem) => workItem.lineIndex !== lineIndex))
+  }
+
+  const handleUseInvoicedAsPaid = () => {
+    if (!canUseInvoicedAsPaid) {
+      return
+    }
+
+    const nextPaidIncome = paidIncomeInvoiceAmount.toFixed(2)
+
+    updateDraftField('paidIncome', nextPaidIncome)
+    setPaidIncome(nextPaidIncome)
   }
 
   const showSaveToast = (message: string) => {
@@ -1941,17 +1962,30 @@ export function DailyLog({
             </>
           ) : null}
 
-          <label className="block">
-            <span className="mb-2 block text-sm font-medium text-foreground">
-              Paid income (excl. VAT)
-            </span>
+          <div className="block">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <label className="block text-sm font-medium text-foreground" htmlFor="daily-paid-income">
+                Paid income (excl. VAT)
+              </label>
+              <button
+                aria-label={useInvoicedAsPaidLabel}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-xs font-semibold text-foreground transition hover:bg-muted/80 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!canUseInvoicedAsPaid}
+                onClick={handleUseInvoicedAsPaid}
+                title={useInvoicedAsPaidLabel}
+                type="button"
+              >
+                <MatchAmountIcon />
+                Use invoiced
+              </button>
+            </div>
             <input
+              id="daily-paid-income"
               className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary"
               disabled={isSelectedDayMarkedNoWork || isSelectedDayMarkedVacation || isSelectedMonthEmployment}
               type="number"
               min="0"
               step="0.01"
-              placeholder={paidIncomePlaceholder}
               value={paidIncome}
               onChange={(event) => {
                 updateDraftField('paidIncome', event.target.value)
@@ -1961,7 +1995,7 @@ export function DailyLog({
             <span className="mt-2 block text-xs text-muted-foreground">
               Use this only when money actually came in.
             </span>
-          </label>
+          </div>
 
           <label className="block">
             <span className="mb-2 block text-sm font-medium text-foreground">
@@ -2194,6 +2228,19 @@ function ToastCloseIcon() {
     <svg aria-hidden="true" className="h-4 w-4" fill="none" viewBox="0 0 24 24">
       <path
         d="m6 6 12 12M18 6 6 18"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.8"
+      />
+    </svg>
+  )
+}
+
+function MatchAmountIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24">
+      <path
+        d="M6 8h12M6 16h12"
         stroke="currentColor"
         strokeLinecap="round"
         strokeWidth="1.8"

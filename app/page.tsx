@@ -21,6 +21,7 @@ import {
 } from "@/lib/app-data-store";
 import { starterStoredState } from "@/lib/default-state";
 import {
+  clearStoredUiPreferences,
   clearUserReportDayFormDrafts,
   clearUserReportDraftEntries,
   getUserCurrentScreen,
@@ -98,6 +99,17 @@ function clearDashboardAlertLoginSessionKey() {
   }
 
   window.sessionStorage.removeItem(DASHBOARD_ALERT_LOGIN_SESSION_KEY);
+}
+
+function clearBrowserSessionState() {
+  if (typeof window !== "undefined") {
+    window.sessionStorage.removeItem(CONFIG_SCREEN_INTENT_KEY);
+    window.sessionStorage.removeItem(CONFIG_SCREEN_FOCUS_TARGET_KEY);
+    window.sessionStorage.removeItem(CONFIG_SCREEN_TARGET_MONTH_KEY);
+  }
+
+  clearDashboardAlertLoginSessionKey();
+  clearStoredUiPreferences();
 }
 
 function cloneEntries(entries: DailyEntry[]) {
@@ -439,15 +451,30 @@ export default function Home() {
         return;
       }
 
-      clearDashboardAlertLoginSessionKey();
+      clearBrowserSessionState();
       setDashboardAlertPulseSessionKey(undefined);
       setIsReportsAlertDismissedForSession(false);
       setShouldShowDashboardGreeting(false);
       setCurrentScreen("dashboard");
+      setEntries(starterStoredState.entries);
       setReportDraftEntries(null);
+      setMonthlySummaries(starterStoredState.monthlySummaries);
+      setSettings(starterStoredState.settings);
+      setDisplayName(undefined);
+      setHasLoadedRemoteState(false);
       setHasHydratedReportDraftEntries(false);
       setHasUnsavedReportFieldDrafts(false);
+      setHasUnsavedConfigurationChanges(false);
       setLoadedRemoteUserId(null);
+      setFillMissingDayTargetDateKey(undefined);
+      setPendingScreen(null);
+      setPendingSummaryConflictSaveEntries(null);
+      setPendingFutureSaveEntries(null);
+      setIsUnsavedReportModalOpen(false);
+      setIsUnsavedConfigurationModalOpen(false);
+      setIsSummaryConflictWarningOpen(false);
+      setIsEmploymentMonthWarningOpen(false);
+      setIsFutureReportWarningOpen(false);
       lastPersistedEntriesRef.current = null;
       return;
     }
@@ -839,6 +866,8 @@ export default function Home() {
 
     try {
       await signOutFromSupabase();
+      clearBrowserSessionState();
+      setSession(null);
       setHasLoadedRemoteState(false);
     } catch (error) {
       setToastErrorMessage(getErrorMessage(error, "Sign out failed."));
