@@ -41,13 +41,26 @@ function isScreen(value: unknown): value is Screen {
   return value === 'dashboard' || value === 'daily-log' || value === 'configuration'
 }
 
+function clearLegacyPersistentPreferences() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.removeItem(UI_PREFERENCES_KEY)
+  } catch {
+    // Ignore storage access failures.
+  }
+}
+
 function readStoredPreferences(): StoredUiPreferences {
   if (typeof window === 'undefined') {
     return {}
   }
 
   try {
-    const storedValue = window.localStorage.getItem(UI_PREFERENCES_KEY)
+    clearLegacyPersistentPreferences()
+    const storedValue = window.sessionStorage.getItem(UI_PREFERENCES_KEY)
 
     if (!storedValue) {
       return {}
@@ -65,7 +78,34 @@ function writeStoredPreferences(storedPreferences: StoredUiPreferences) {
     return
   }
 
-  window.localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(storedPreferences))
+  clearLegacyPersistentPreferences()
+
+  if (Object.keys(storedPreferences).length === 0) {
+    window.sessionStorage.removeItem(UI_PREFERENCES_KEY)
+    return
+  }
+
+  window.sessionStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(storedPreferences))
+}
+
+export function clearStoredUiPreferences() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  clearLegacyPersistentPreferences()
+  window.sessionStorage.removeItem(UI_PREFERENCES_KEY)
+}
+
+export function clearUserUiPreferences(userId: string) {
+  const storedPreferences = readStoredPreferences()
+
+  if (!storedPreferences[userId]) {
+    return
+  }
+
+  const { [userId]: _removedPreferences, ...remainingPreferences } = storedPreferences
+  writeStoredPreferences(remainingPreferences)
 }
 
 export function getUserCurrentScreen(userId: string): Screen | undefined {

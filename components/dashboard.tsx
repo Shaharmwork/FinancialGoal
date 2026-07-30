@@ -191,7 +191,7 @@ const DASHBOARD_POS = {
     statusY: 5,
     trackY: 30,
     trackHeight: 11.5,
-    thumbY: 19,
+    thumbY: 15,
     thumbClampMin: 4,
     thumbClampMax: 96,
   },
@@ -2170,7 +2170,7 @@ function ProgressRow({
         </div>
       </div>
       <span
-        className="absolute block h-8 w-8 -translate-x-1/2"
+        className="absolute block h-10 w-10 -translate-x-1/2"
         style={{
           left: `${thumbPosition}%`,
           top: DASHBOARD_POS.progress.thumbY,
