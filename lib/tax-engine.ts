@@ -9,7 +9,20 @@
  *   of the self-employed deduction (both need the 1,225-hours rule)
  * - the health contribution (Zvw) is charged on taxable profit, i.e. after the entrepreneur
  *   deductions and the SME profit exemption
+ * - above the top bracket threshold, the benefit of the entrepreneur deductions and the SME
+ *   profit exemption is limited to 37.56% (tariefsaanpassing, art. 2.10 lid 2-3 Wet IB 2001)
  */
+
+// The only tax year whose rules are implemented. Other years show no tax figures.
+export const SUPPORTED_TAX_YEAR = 2026
+
+export function isSupportedTaxYear(year: number) {
+  return year === SUPPORTED_TAX_YEAR
+}
+
+const TOP_BRACKET_THRESHOLD = 78426
+// 49.50% - 37.56%: the part of the top rate the limited deductions don't get back.
+const DEDUCTION_RATE_LIMIT_ADJUSTMENT = 0.1194
 interface AnnualTaxInput {
   annualBusinessIncome: number
   annualBusinessExpenses: number
@@ -34,6 +47,7 @@ export interface AnnualTaxEstimate {
   taxableProfit: number
   taxableEmploymentIncome: number
   taxableIncome: number
+  deductionLimitAdjustment: number
   incomeTaxBeforeCredits: number
   generalTaxCredit: number
   workTaxCredit: number
@@ -147,7 +161,19 @@ export function estimateAnnualTaxFor2026({
   const taxableProfit = profitAfterDeduction * (1 - smallBusinessProfitExemptionRate)
   const taxableEmploymentIncome = normalizedEmploymentGrossSalary
   const taxableIncome = taxableProfit + taxableEmploymentIncome
-  const incomeTaxBeforeCredits = calculateIncomeTaxBeforeCredits(taxableIncome)
+  // Tariefsaanpassing: 11.94% of the lower of (a) the limited deductions and (b) how far
+  // taxable income plus those deductions exceeds the top bracket threshold.
+  const appliedEntrepreneurDeductions = annualBusinessProfit - profitAfterDeduction
+  const smeProfitExemption = profitAfterDeduction - taxableProfit
+  const limitedDeductions = appliedEntrepreneurDeductions + smeProfitExemption
+  const deductionLimitAdjustment =
+    DEDUCTION_RATE_LIMIT_ADJUSTMENT *
+    Math.min(
+      limitedDeductions,
+      Math.max(0, taxableIncome + limitedDeductions - TOP_BRACKET_THRESHOLD),
+    )
+  const incomeTaxBeforeCredits =
+    calculateIncomeTaxBeforeCredits(taxableIncome) + deductionLimitAdjustment
   const generalTaxCredit = calculateGeneralTaxCredit(taxableIncome)
   const workTaxCredit = calculateWorkTaxCredit(annualCombinedPreTaxIncome)
   const healthContribution = calculateHealthContribution(
@@ -176,6 +202,7 @@ export function estimateAnnualTaxFor2026({
     taxableProfit: roundCurrency(taxableProfit),
     taxableEmploymentIncome: roundCurrency(taxableEmploymentIncome),
     taxableIncome: roundCurrency(taxableIncome),
+    deductionLimitAdjustment: roundCurrency(deductionLimitAdjustment),
     incomeTaxBeforeCredits: roundCurrency(incomeTaxBeforeCredits),
     generalTaxCredit: roundCurrency(generalTaxCredit),
     workTaxCredit: roundCurrency(workTaxCredit),

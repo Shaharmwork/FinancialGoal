@@ -132,7 +132,7 @@ export function FieldLabel({
 // Spinner arrows are hidden so short number fields show their whole value.
 export function inputClassName(invalid = false, extra?: string) {
   return cx(
-    "w-full min-w-0 rounded-[13px] border bg-[#0f0b08] px-3.5 py-3 text-[15px] text-[#f7ebda] outline-none transition placeholder:text-[#6f5a47] disabled:cursor-not-allowed disabled:opacity-50",
+    "w-full min-w-0 rounded-[13px] border bg-[#0f0b08] px-3.5 py-3 text-base text-[#f7ebda] outline-none transition placeholder:text-[#6f5a47] disabled:cursor-not-allowed disabled:opacity-50",
     "[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
     invalid
       ? "border-[#ff6b5b]/75 bg-[#260d0a] focus:border-[#ff8a7a]"

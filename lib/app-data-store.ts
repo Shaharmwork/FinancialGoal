@@ -7,6 +7,7 @@ import {
   starterStoredState,
 } from './default-state'
 import { getCurrentSession, getSupabaseClient, hasSupabaseConfig } from './supabase'
+import type { ConflictReason, MutationOutcome } from './sync'
 import type { DailyEntry, MonthlySummary, Settings, WorkItem } from './types'
 
 interface RemoteAppData {
@@ -30,6 +31,7 @@ interface AppSettingsRow {
   qualifies_for_self_employed_deduction?: boolean | null
   qualifies_for_starters_deduction?: boolean | null
   vacation_days_per_year?: number | null
+  updated_at?: string | null
   user_id?: string
 }
 
@@ -42,11 +44,13 @@ interface DailyEntryRow {
   date: string
   day_status?: string | null
   hours: number
+  hourly_rate?: number | null
+  pricing_mode?: string | null
   invoiced_income: number
-  paid_income: number
   expenses: number
   source: string | null
   note: string | null
+  updated_at?: string | null
   user_id?: string | null
 }
 
@@ -57,8 +61,8 @@ interface DailyEntryWorkItemRow {
   hours: number
   hourly_rate: number | null
   invoiced_income: number
-  created_at?: string
   line_index: number
+  pricing_mode?: string | null
 }
 
 interface MonthlySummaryRow {
@@ -71,7 +75,26 @@ interface MonthlySummaryRow {
   gross_salary?: number | null
   net_salary_received?: number | null
   tax_already_withheld?: number | null
+  updated_at?: string | null
   user_id?: string | null
+}
+
+interface RpcResult {
+  status: 'saved' | 'deleted' | 'conflict'
+  reason?: ConflictReason
+  current_updated_at?: string
+  entry?: DailyEntryRow
+  work_items?: DailyEntryWorkItemRow[]
+  summary?: MonthlySummaryRow
+  settings?: AppSettingsRow
+}
+
+// The save functions come from supabase/migrations/20261028_safe_saving.sql.
+export class DatabaseUpdateRequiredError extends Error {
+  constructor() {
+    super('The database needs an update before changes can be saved. Nothing was changed.')
+    this.name = 'DatabaseUpdateRequiredError'
+  }
 }
 
 function getStarterData(): RemoteAppData {
@@ -87,10 +110,20 @@ async function getRequiredUserId() {
   const userId = session?.user?.id
 
   if (!userId) {
-    throw new Error('No authenticated Supabase user available for remote write.')
+    throw new Error('You are signed out. Sign in again to save.')
   }
 
   return userId
+}
+
+function getRequiredClient() {
+  const supabase = getSupabaseClient()
+
+  if (!supabase) {
+    throw new Error('Supabase is not configured.')
+  }
+
+  return supabase
 }
 
 function mapSettingsFromRow(row: AppSettingsRow | null): Settings {
@@ -106,16 +139,16 @@ function mapSettingsFromRow(row: AppSettingsRow | null): Settings {
     reserveBufferPercent: row.reserve_buffer_percent,
     spouseMonthlyIncome: row.spouse_monthly_income,
     targetNetMonth: row.target_net_month,
+    updatedAt: row.updated_at ?? undefined,
     vacationDaysPerYear: row.vacation_days_per_year,
     weeklyHoursTarget: row.weekly_hours_target,
   })
 }
 
-function mapSettingsToRow(settings: Settings, userId: string) {
+function mapSettingsToPayload(settings: Settings) {
   return {
     default_shift_hours: settings.defaultShiftHours,
     default_shift_income: settings.defaultShiftIncome,
-    user_id: userId,
     qualifies_for_self_employed_deduction: settings.qualifiesForSelfEmployedDeduction,
     qualifies_for_starters_deduction: settings.qualifiesForStartersDeduction,
     reserve_buffer_percent: settings.reserveBufferPercent,
@@ -138,7 +171,6 @@ function hasAnyUserData({
   return hasSettingsRow || entries.length > 0 || monthlySummaries.length > 0
 }
 
-
 function mapWorkItemFromRow(row: DailyEntryWorkItemRow): WorkItem | null {
   return normalizeWorkItem({
     dailyEntryId: row.daily_entry_id,
@@ -147,6 +179,7 @@ function mapWorkItemFromRow(row: DailyEntryWorkItemRow): WorkItem | null {
     id: row.id,
     invoicedIncome: row.invoiced_income,
     lineIndex: row.line_index,
+    pricingMode: row.pricing_mode,
     projectName: row.project_name ?? '',
   })
 }
@@ -157,11 +190,14 @@ function mapEntryFromRow(row: DailyEntryRow, workItems: WorkItem[] = []): DailyE
     date: row.date,
     dayStatus: row.day_status,
     expenses: row.expenses,
+    hourlyRate: row.hourly_rate,
     hours: row.hours,
     id: row.id,
     invoicedIncome: row.invoiced_income,
     note: row.note,
+    pricingMode: row.pricing_mode,
     source: row.source,
+    updatedAt: row.updated_at ?? undefined,
     workItems: isWorkedEntry ? workItems : [],
   })
 
@@ -176,46 +212,35 @@ function mapEntryFromRow(row: DailyEntryRow, workItems: WorkItem[] = []): DailyE
   }
 }
 
-function mapEntryToRow(entry: DailyEntry, userId: string) {
+function mapEntryToPayload(entry: DailyEntry) {
   const isWorkedEntry = (entry.dayStatus ?? 'worked') === 'worked'
-  const invoicedIncome = isWorkedEntry ? getEntryInvoicedIncome(entry) : 0
+  const hasWorkItems = isWorkedEntry && (entry.workItems?.length ?? 0) > 0
 
-  // The app only tracks earned income; paid_income is kept equal to it for the legacy column.
   return {
-    date: entry.date,
-    day_status: entry.dayStatus ?? 'worked',
-    expenses: entry.expenses,
-    hours: isWorkedEntry ? getEntryHours(entry) : 0,
-    id: entry.id,
-    invoiced_income: invoicedIncome,
-    note: entry.note ?? null,
-    paid_income: invoicedIncome,
-    source: entry.source ?? null,
-    user_id: userId,
-  }
-}
-
-function getWorkItemsToSave(entry: DailyEntry) {
-  if ((entry.dayStatus ?? 'worked') !== 'worked' || !entry.workItems || entry.workItems.length === 0) {
-    return []
-  }
-
-  return entry.workItems
-    .map((workItem, index) => ({
-      ...workItem,
-      lineIndex: workItem.lineIndex ?? index,
-    }))
-    .sort((left, right) => left.lineIndex - right.lineIndex)
-}
-
-function mapWorkItemToRow(workItem: WorkItem, entryId: string) {
-  return {
-    daily_entry_id: entryId,
-    project_name: workItem.projectName.trim() === '' ? null : workItem.projectName.trim(),
-    hours: workItem.hours,
-    hourly_rate: workItem.hourlyRate,
-    invoiced_income: workItem.invoicedIncome,
-    line_index: workItem.lineIndex,
+    entry: {
+      id: entry.id,
+      date: entry.date,
+      day_status: entry.dayStatus ?? 'worked',
+      hours: isWorkedEntry ? getEntryHours(entry) : 0,
+      invoiced_income: isWorkedEntry ? getEntryInvoicedIncome(entry) : 0,
+      hourly_rate: isWorkedEntry && !hasWorkItems ? (entry.hourlyRate ?? null) : null,
+      pricing_mode: isWorkedEntry && !hasWorkItems ? (entry.pricingMode ?? null) : null,
+      expenses: entry.expenses,
+      note: entry.note ?? null,
+      source: entry.source ?? null,
+    },
+    workItems: hasWorkItems
+      ? [...(entry.workItems ?? [])]
+          .sort((left, right) => left.lineIndex - right.lineIndex)
+          .map((workItem, index) => ({
+            project_name: workItem.projectName.trim() === '' ? null : workItem.projectName.trim(),
+            hours: workItem.hours,
+            hourly_rate: workItem.hourlyRate,
+            invoiced_income: workItem.invoicedIncome,
+            line_index: workItem.lineIndex ?? index,
+            pricing_mode: workItem.pricingMode ?? null,
+          }))
+      : [],
   }
 }
 
@@ -229,11 +254,12 @@ function mapMonthlySummaryFromRow(row: MonthlySummaryRow): MonthlySummary | null
     monthKey: row.month_key,
     netSalaryReceived: row.net_salary_received,
     taxAlreadyWithheld: row.tax_already_withheld,
+    updatedAt: row.updated_at ?? undefined,
     workLines: row.work_lines,
   })
 }
 
-function mapMonthlySummaryToRow(summary: MonthlySummary, userId: string) {
+function mapMonthlySummaryToPayload(summary: MonthlySummary) {
   return {
     expenses: summary.expenses,
     gross_salary: summary.grossSalary,
@@ -242,158 +268,123 @@ function mapMonthlySummaryToRow(summary: MonthlySummary, userId: string) {
     month_key: summary.monthKey,
     month_type: summary.monthType,
     net_salary_received: summary.netSalaryReceived,
-    paid_income: summary.invoicedIncome,
     tax_already_withheld: summary.taxAlreadyWithheld,
-    user_id: userId,
     work_lines: summary.workLines && summary.workLines.length > 0 ? summary.workLines : null,
   }
 }
 
-async function replaceDailyEntries(entries: DailyEntry[]) {
-  const supabase = getSupabaseClient()
-  if (!supabase) {
-    return
+async function callSaveFunction(name: string, args: Record<string, unknown>): Promise<RpcResult> {
+  await getRequiredUserId()
+  const { data, error } = await getRequiredClient().rpc(name, args)
+
+  if (error) {
+    // PGRST202: the function doesn't exist yet (migration not applied).
+    if (error.code === 'PGRST202' || error.code === '42883') {
+      throw new DatabaseUpdateRequiredError()
+    }
+
+    throw new Error(error.message || 'Saving failed.')
   }
-  const userId = await getRequiredUserId()
-  const normalizedEntries = entries.map((entry) => {
-    const isWorkedEntry = (entry.dayStatus ?? 'worked') === 'worked'
 
-    if (!isWorkedEntry) {
-      return {
-        ...entry,
-        hours: 0,
-        invoicedIncome: 0,
-        expenses: entry.expenses,
-        workItems: undefined,
-      }
-    }
+  if (!data || typeof data !== 'object' || !('status' in data)) {
+    throw new Error('Unexpected response from the database.')
+  }
 
-    if (!entry.workItems || entry.workItems.length === 0) {
-      return entry
-    }
+  return data as RpcResult
+}
 
-    return {
-      ...entry,
-      hours: getEntryHours(entry),
-      invoicedIncome: getEntryInvoicedIncome(entry),
-    }
+function toConflict<T>(result: RpcResult): MutationOutcome<T> {
+  return {
+    status: 'conflict',
+    reason: result.reason ?? 'changed',
+    currentUpdatedAt: result.current_updated_at,
+  }
+}
+
+export async function saveDailyEntryRemote(
+  entry: DailyEntry,
+  expectedUpdatedAt: string | null,
+  mutationId: string,
+): Promise<MutationOutcome<DailyEntry>> {
+  const payload = mapEntryToPayload(entry)
+  const result = await callSaveFunction('save_daily_entry', {
+    p_entry: payload.entry,
+    p_expected_updated_at: expectedUpdatedAt,
+    p_mutation_id: mutationId,
+    p_work_items: payload.workItems,
   })
 
-  const existingResult = await supabase.from('daily_entries').select('id')
-  if (existingResult.error) {
-    throw existingResult.error
+  if (result.status !== 'saved' || !result.entry) {
+    return toConflict(result)
   }
 
-  if (normalizedEntries.length > 0) {
-    const upsertResult = await supabase
-      .from('daily_entries')
-      .upsert(normalizedEntries.map((entry) => mapEntryToRow(entry, userId)), { onConflict: 'id' })
+  const workItems = (result.work_items ?? [])
+    .map(mapWorkItemFromRow)
+    .filter((workItem): workItem is WorkItem => workItem !== null)
+  const savedEntry = mapEntryFromRow(result.entry, workItems)
 
-    if (upsertResult.error) {
-      throw upsertResult.error
-    }
+  if (!savedEntry) {
+    throw new Error('Unexpected response from the database.')
   }
 
-  const nextIds = new Set(normalizedEntries.map((entry) => entry.id))
-  const idsToDelete =
-    existingResult.data
-      ?.map((row) => row.id)
-      .filter((id): id is string => typeof id === 'string' && !nextIds.has(id)) ?? []
-
-  if (idsToDelete.length > 0) {
-    const deleteResult = await supabase.from('daily_entries').delete().in('id', idsToDelete)
-
-    if (deleteResult.error) {
-      throw deleteResult.error
-    }
-  }
-
-  const entryIdsToReplace = normalizedEntries.map((entry) => entry.id)
-  if (entryIdsToReplace.length > 0) {
-    const deleteWorkItemsResult = await supabase
-      .from('daily_entry_work_items')
-      .delete()
-      .in('daily_entry_id', entryIdsToReplace)
-
-    if (deleteWorkItemsResult.error) {
-      throw deleteWorkItemsResult.error
-    }
-  }
-
-  const workItemRows = normalizedEntries.flatMap((entry) =>
-    getWorkItemsToSave(entry).map((workItem) => mapWorkItemToRow(workItem, entry.id)),
-  )
-
-  if (workItemRows.length > 0) {
-    const insertWorkItemsResult = await supabase
-      .from('daily_entry_work_items')
-      .insert(workItemRows)
-
-    if (insertWorkItemsResult.error) {
-      throw insertWorkItemsResult.error
-    }
-  }
+  return { status: 'saved', value: savedEntry }
 }
 
-async function replaceMonthlySummaries(monthlySummaries: MonthlySummary[]) {
-  const supabase = getSupabaseClient()
-  if (!supabase) {
-    return
-  }
-  const userId = await getRequiredUserId()
+export async function deleteDailyEntryRemote(
+  id: string,
+  expectedUpdatedAt: string,
+): Promise<MutationOutcome<never>> {
+  const result = await callSaveFunction('delete_daily_entry', {
+    p_expected_updated_at: expectedUpdatedAt,
+    p_id: id,
+  })
 
-  const existingResult = await supabase.from('monthly_summaries').select('month_key')
-  if (existingResult.error) {
-    throw existingResult.error
-  }
-
-  if (monthlySummaries.length > 0) {
-    const upsertResult = await supabase
-      .from('monthly_summaries')
-      .upsert(monthlySummaries.map((summary) => mapMonthlySummaryToRow(summary, userId)), {
-        onConflict: 'user_id,month_key',
-      })
-
-    if (upsertResult.error) {
-      throw upsertResult.error
-    }
-  }
-
-  const nextMonthKeys = new Set(monthlySummaries.map((summary) => summary.monthKey))
-  const monthKeysToDelete =
-    existingResult.data
-      ?.map((row) => row.month_key)
-      .filter(
-        (monthKey): monthKey is string =>
-          typeof monthKey === 'string' && !nextMonthKeys.has(monthKey),
-      ) ?? []
-
-  if (monthKeysToDelete.length > 0) {
-    const deleteResult = await supabase
-      .from('monthly_summaries')
-      .delete()
-      .in('month_key', monthKeysToDelete)
-
-    if (deleteResult.error) {
-      throw deleteResult.error
-    }
-  }
+  return result.status === 'deleted' ? { status: 'deleted' } : toConflict(result)
 }
 
-async function saveSettingsInternal(settings: Settings) {
-  const supabase = getSupabaseClient()
-  if (!supabase) {
-    return
-  }
-  const userId = await getRequiredUserId()
+export async function saveMonthlySummaryRemote(
+  summary: MonthlySummary,
+  expectedUpdatedAt: string | null,
+  mutationId: string,
+): Promise<MutationOutcome<MonthlySummary>> {
+  const result = await callSaveFunction('save_monthly_summary', {
+    p_expected_updated_at: expectedUpdatedAt,
+    p_mutation_id: mutationId,
+    p_summary: mapMonthlySummaryToPayload(summary),
+  })
 
-  const result = await supabase
-    .from('app_settings')
-    .upsert(mapSettingsToRow(settings, userId), { onConflict: 'user_id' })
+  const savedSummary =
+    result.status === 'saved' && result.summary ? mapMonthlySummaryFromRow(result.summary) : null
 
-  if (result.error) {
-    throw result.error
-  }
+  return savedSummary ? { status: 'saved', value: savedSummary } : toConflict(result)
+}
+
+export async function deleteMonthlySummaryRemote(
+  monthKey: string,
+  expectedUpdatedAt: string,
+): Promise<MutationOutcome<never>> {
+  const result = await callSaveFunction('delete_monthly_summary', {
+    p_expected_updated_at: expectedUpdatedAt,
+    p_month_key: monthKey,
+  })
+
+  return result.status === 'deleted' ? { status: 'deleted' } : toConflict(result)
+}
+
+export async function saveSettingsRemote(
+  settings: Settings,
+  expectedUpdatedAt: string | null,
+  mutationId: string,
+): Promise<MutationOutcome<Settings>> {
+  const result = await callSaveFunction('save_settings', {
+    p_expected_updated_at: expectedUpdatedAt,
+    p_mutation_id: mutationId,
+    p_settings: mapSettingsToPayload(settings),
+  })
+
+  return result.status === 'saved' && result.settings
+    ? { status: 'saved', value: mapSettingsFromRow(result.settings) }
+    : toConflict(result)
 }
 
 export async function loadRemoteAppData(): Promise<LoadedRemoteAppData> {
@@ -405,23 +396,11 @@ export async function loadRemoteAppData(): Promise<LoadedRemoteAppData> {
     }
   }
 
-  const supabase = getSupabaseClient()
-  if (!supabase) {
-    return {
-      ...getStarterData(),
-      displayName: undefined,
-      isNewUser: false,
-    }
-  }
-
+  const supabase = getRequiredClient()
   const userId = await getRequiredUserId()
 
   const [settingsResult, entriesResult, monthlySummariesResult, profileResult] = await Promise.all([
-    supabase
-      .from('app_settings')
-      .select('*')
-      .eq('user_id', userId)
-      .maybeSingle(),
+    supabase.from('app_settings').select('*').eq('user_id', userId).maybeSingle(),
     supabase.from('daily_entries').select('*').order('date', { ascending: false }),
     supabase.from('monthly_summaries').select('*').order('month_key', { ascending: true }),
     supabase.from('profiles').select('display_name').eq('id', userId).maybeSingle(),
@@ -514,28 +493,4 @@ export async function loadRemoteAppData(): Promise<LoadedRemoteAppData> {
     settings: mapSettingsFromRow(settingsResult.data as AppSettingsRow | null),
     isNewUser: false,
   }
-}
-
-export async function saveSettingsToSupabase(settings: Settings) {
-  if (!hasSupabaseConfig()) {
-    return
-  }
-
-  await saveSettingsInternal(settings)
-}
-
-export async function saveDailyEntriesToSupabase(entries: DailyEntry[]) {
-  if (!hasSupabaseConfig()) {
-    return
-  }
-
-  await replaceDailyEntries(entries)
-}
-
-export async function saveMonthlySummariesToSupabase(monthlySummaries: MonthlySummary[]) {
-  if (!hasSupabaseConfig()) {
-    return
-  }
-
-  await replaceMonthlySummaries(monthlySummaries)
 }

@@ -2,17 +2,17 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import Image, { type StaticImageData } from "next/image";
-import CleanDash from "@/src/assets/backgrounds/CleanDash.png";
+import CleanDash from "@/src/assets/web/backgrounds/CleanDash.jpg";
 import CardStrip from "@/src/assets/backgrounds/stage/card-strip.png";
 import CardTopLeft from "@/src/assets/backgrounds/stage/card-top-left.png";
 import CardTopMiddle from "@/src/assets/backgrounds/stage/card-top-middle.png";
 import CardTopRight from "@/src/assets/backgrounds/stage/card-top-right.png";
-import CenterHighlightButton from "@/src/assets/icons/CenterHighlightButton.png";
-import ConfigurationIcon from "@/src/assets/icons/ConfigurationIcon.png";
-import LeftHighlightButton from "@/src/assets/icons/LeftHighlightButton.png";
-import OwlIcon from "@/src/assets/icons/Owlicon.png";
-import ReportIcon from "@/src/assets/icons/ReportIcon.png";
-import RightHighlightButton from "@/src/assets/icons/RightHighlightButton.png";
+import CenterHighlightButton from "@/src/assets/web/icons/CenterHighlightButton.png";
+import ConfigurationIcon from "@/src/assets/web/icons/ConfigurationIcon.png";
+import LeftHighlightButton from "@/src/assets/web/icons/LeftHighlightButton.png";
+import OwlIcon from "@/src/assets/web/icons/Owlicon.png";
+import ReportIcon from "@/src/assets/web/icons/ReportIcon.png";
+import RightHighlightButton from "@/src/assets/web/icons/RightHighlightButton.png";
 import type { Screen } from "@/lib/types";
 
 // Every screen is drawn on the same phone-sized stage (the dashboard artwork's size),
@@ -69,27 +69,111 @@ const NAV_ITEMS: Array<{
   },
 ];
 
-function useStageScale() {
-  const [scale, setScale] = useState(1);
+// Up to this width the app is treated as running on a phone.
+const PHONE_MAX_WIDTH = 500;
+const PHONE_MAX_SCALE = 1.1;
+
+interface StageLayout {
+  // "phone": scaled to the screen width and filling its height. "framed": a fixed
+  // 390x844 phone frame scaled to fit a larger (desktop) window.
+  mode: "phone" | "framed";
+  scale: number;
+  viewportHeight: number;
+}
+
+function useStageLayout(): StageLayout {
+  const [layout, setLayout] = useState<StageLayout>({
+    mode: "framed",
+    scale: 1,
+    viewportHeight: STAGE_HEIGHT,
+  });
 
   useEffect(() => {
-    const updateScale = () => {
-      const availableWidth = Math.max(1, window.innerWidth - STAGE_VIEWPORT_PADDING);
-      const availableHeight = Math.max(1, window.innerHeight - STAGE_VIEWPORT_PADDING);
-      const nextScale = Math.min(1, availableWidth / STAGE_WIDTH, availableHeight / STAGE_HEIGHT);
+    const updateLayout = () => {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
 
-      setScale(Number(nextScale.toFixed(4)));
+      if (width <= PHONE_MAX_WIDTH) {
+        // Scale by width only. Scaling by height too made text tiny on short phones,
+        // and the on-screen keyboard must not shrink the whole app.
+        setLayout({
+          mode: "phone",
+          scale: Number(Math.min(PHONE_MAX_SCALE, width / STAGE_WIDTH).toFixed(4)),
+          viewportHeight: height,
+        });
+        return;
+      }
+
+      const availableWidth = Math.max(1, width - STAGE_VIEWPORT_PADDING);
+      const availableHeight = Math.max(1, height - STAGE_VIEWPORT_PADDING);
+      setLayout({
+        mode: "framed",
+        scale: Number(
+          Math.min(1, availableWidth / STAGE_WIDTH, availableHeight / STAGE_HEIGHT).toFixed(4),
+        ),
+        viewportHeight: height,
+      });
     };
 
-    updateScale();
-    window.addEventListener("resize", updateScale);
+    updateLayout();
+    window.addEventListener("resize", updateLayout);
+    window.addEventListener("orientationchange", updateLayout);
 
     return () => {
-      window.removeEventListener("resize", updateScale);
+      window.removeEventListener("resize", updateLayout);
+      window.removeEventListener("orientationchange", updateLayout);
     };
   }, []);
 
-  return scale;
+  return layout;
+}
+
+function isTextField(target: EventTarget | null): target is HTMLInputElement | HTMLTextAreaElement {
+  return (
+    (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
+    target.closest("[data-stage-scroll]") !== null
+  );
+}
+
+// While typing on a phone: keep the field visible above the keyboard, and report
+// it so the dock can step aside and leave the room for the form.
+function useTypingInStage(enabled: boolean) {
+  const [isTyping, setIsTyping] = useState(false);
+
+  useEffect(() => {
+    if (!enabled) {
+      setIsTyping(false);
+      return;
+    }
+
+    const handleFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+
+      if (!isTextField(target)) {
+        return;
+      }
+
+      setIsTyping(true);
+      window.setTimeout(() => {
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 300);
+    };
+
+    const handleFocusOut = (event: FocusEvent) => {
+      if (isTextField(event.target) && !isTextField(event.relatedTarget)) {
+        setIsTyping(false);
+      }
+    };
+
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("focusout", handleFocusOut);
+    return () => {
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("focusout", handleFocusOut);
+    };
+  }, [enabled]);
+
+  return isTyping;
 }
 
 export function PhoneStage({
@@ -105,19 +189,29 @@ export function PhoneStage({
   // "screen": a scrolling screen with the artwork's dock frame at the bottom.
   variant: "artwork" | "screen";
 }) {
-  const stageScale = useStageScale();
+  const layout = useStageLayout();
+  const isPhone = layout.mode === "phone";
+  const isTyping = useTypingInStage(isPhone && variant === "screen");
+  // On a phone, scrolling screens fill the screen height; the dashboard artwork keeps
+  // its fixed height and the page scrolls if the screen is shorter than that.
+  const stageHeight =
+    isPhone && variant === "screen" ? layout.viewportHeight / layout.scale : STAGE_HEIGHT;
 
-  return (
-    <div className="fixed inset-0 z-[180] overflow-hidden bg-black text-[#f7ebda]">
-      <div className="relative h-[100dvh] w-full overflow-hidden bg-black">
-        {/* The transform also makes this the containing block for fixed children
-            (toasts, save bar), so they stay inside the phone frame. */}
+  const stage = (
         <div
-          className="absolute left-1/2 top-1/2 overflow-hidden rounded-[2rem] bg-[#050505] shadow-[0_28px_80px_rgba(0,0,0,0.72)]"
+          className={`overflow-hidden bg-[#050505] ${
+            isPhone
+              ? "absolute left-0 top-0"
+              : "absolute left-1/2 top-1/2 rounded-[2rem] shadow-[0_28px_80px_rgba(0,0,0,0.72)]"
+          }`}
+          // The transform also makes this the containing block for fixed children
+          // (toasts, save bar), so they stay inside the stage.
           style={{
-            height: STAGE_HEIGHT,
-            transform: `translate(-50%, -50%) scale(${stageScale})`,
-            transformOrigin: "center center",
+            height: stageHeight,
+            transform: isPhone
+              ? `scale(${layout.scale})`
+              : `translate(-50%, -50%) scale(${layout.scale})`,
+            transformOrigin: isPhone ? "top left" : "center center",
             width: STAGE_WIDTH,
           }}
         >
@@ -140,16 +234,36 @@ export function PhoneStage({
               <div
                 className="absolute inset-x-0 top-0 overflow-y-auto overscroll-contain px-4 pb-24 pt-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                 data-stage-scroll
-                style={{ bottom: DOCK_HEIGHT - 14 }}
+                style={{ bottom: isTyping ? 0 : DOCK_HEIGHT - 14 }}
               >
                 {children}
               </div>
-              <DockFrame />
+              {isTyping ? null : <DockFrame />}
             </>
           )}
-          <BottomNavigationDock active={active} onNavigate={onNavigate} />
+          {isTyping ? null : <BottomNavigationDock active={active} onNavigate={onNavigate} />}
+        </div>
+  );
+
+  if (isPhone) {
+    return (
+      <div className="fixed inset-0 z-[180] overflow-x-hidden overflow-y-auto overscroll-none bg-black text-[#f7ebda]">
+        <div
+          className="relative mx-auto"
+          style={{
+            height: stageHeight * layout.scale,
+            width: STAGE_WIDTH * layout.scale,
+          }}
+        >
+          {stage}
         </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-[180] overflow-hidden bg-black text-[#f7ebda]">
+      <div className="relative h-[100dvh] w-full overflow-hidden bg-black">{stage}</div>
     </div>
   );
 }

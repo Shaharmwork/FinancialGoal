@@ -1,4 +1,8 @@
-import { estimateAnnualTaxFor2026, estimateRequiredAnnualBusinessProfitForTargetNet2026 } from './tax-engine'
+import {
+  estimateAnnualTaxFor2026,
+  estimateRequiredAnnualBusinessProfitForTargetNet2026,
+  isSupportedTaxYear,
+} from './tax-engine'
 import { defaultSettings } from './default-state'
 import type { DailyEntry, MonthlySummary, Settings } from './types'
 
@@ -256,6 +260,9 @@ export function getMissingReportDateKeys(
       .map((summary) => summary.monthKey),
   )
   const handledDateKeys = getHandledDateKeys(entries, extraHandledDateKeys)
+  // Same rule as the totals (getMonthTotals): once a month has daily entries, those
+  // entries replace its summary, so the summary no longer covers the missing days.
+  const dailyEntryMonthKeys = new Set(entries.map((entry) => entry.date.slice(0, 7)))
   const cursor = new Date(currentYear, 0, 1)
   const missingDateKeys: string[] = []
 
@@ -263,7 +270,9 @@ export function getMissingReportDateKeys(
     const dateKey = toDateKey(cursor)
     const monthKey = dateKey.slice(0, 7)
     const isMonthCoveredBySummary =
-      (monthKey < currentMonthKey && summaryMonthKeys.has(monthKey)) ||
+      (monthKey < currentMonthKey &&
+        summaryMonthKeys.has(monthKey) &&
+        !dailyEntryMonthKeys.has(monthKey)) ||
       employmentMonthKeys.has(monthKey)
 
     if (
@@ -507,6 +516,10 @@ export interface PlanningConsistency {
 }
 
 export function getPlanningConsistency(settings: Settings, today = new Date()) {
+  if (!isSupportedTaxYear(today.getFullYear())) {
+    return undefined
+  }
+
   const targetNetMonth = getTargetNetMonth(settings)
   const weeklyHoursTarget = getWeeklyHoursTarget(settings)
   const defaultShiftHours = getDefaultShiftHours(settings)
@@ -889,7 +902,8 @@ export interface MonthStats {
 }
 
 export interface YearStats {
-  requiredAnnualBeforeTaxAmount: number
+  // Undefined when the current year's tax rules aren't implemented.
+  requiredAnnualBeforeTaxAmount?: number
   goalAnnualNet: number
   ytdHours: number
   ytdInvoicedIncome: number
@@ -946,14 +960,19 @@ export function getCurrentYearStats(
   const monthKeys = getMonthKeysUntilCurrentMonth(today)
   const yearToDateTotals = getYearlyIncomeTotalsForMonths(entries, monthlySummaries, monthKeys)
   const hasYearData = hasYearlyIncomeData(yearToDateTotals)
-  const annualReserveModel = getAnnualReserveModel(
-    yearToDateTotals,
-    getBusinessMonthSpan(monthlySummaries, today.getFullYear(), elapsedYearMonths),
-    settings,
-  )
+  const isTaxYearSupported = isSupportedTaxYear(today.getFullYear())
+  const annualReserveModel = isTaxYearSupported
+    ? getAnnualReserveModel(
+        yearToDateTotals,
+        getBusinessMonthSpan(monthlySummaries, today.getFullYear(), elapsedYearMonths),
+        settings,
+      )
+    : undefined
 
   return {
-    requiredAnnualBeforeTaxAmount: getRequiredAnnualBeforeTaxAmount(settings),
+    requiredAnnualBeforeTaxAmount: isTaxYearSupported
+      ? getRequiredAnnualBeforeTaxAmount(settings)
+      : undefined,
     goalAnnualNet: roundCurrency(getTargetNetMonth(settings) * 12),
     ytdHours: roundHours(yearToDateTotals.business.hours),
     ytdInvoicedIncome: roundCurrency(yearToDateTotals.business.invoicedIncome),
@@ -1052,10 +1071,14 @@ export function getCurrentMonthStats(
     invoicedIncome: roundCurrency(currentMonthTotals.invoicedIncome),
     expenses: roundCurrency(currentMonthTotals.expenses),
     profit: roundCurrency(currentMonthTotals.profit),
-    reservedTaxFromPreviousMonths: roundCurrency(reservedTaxFromPreviousMonths),
-    forecastCalculatedTaxToSaveThisMonth: roundCurrency(
-      forecastCalculatedTaxToSaveThisMonth,
-    ),
+    ...(isSupportedTaxYear(year)
+      ? {
+          reservedTaxFromPreviousMonths: roundCurrency(reservedTaxFromPreviousMonths),
+          forecastCalculatedTaxToSaveThisMonth: roundCurrency(
+            forecastCalculatedTaxToSaveThisMonth,
+          ),
+        }
+      : {}),
   }
 }
 

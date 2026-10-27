@@ -3,7 +3,7 @@
 import Image from 'next/image'
 import { useState, type FormEvent } from 'react'
 import { FieldLabel, GhostButton, GoldButton, inputClassName, Notice, Panel } from '@/components/ui/kit'
-import OwlIcon from '@/src/assets/icons/Owlicon.png'
+import OwlIcon from '@/src/assets/web/icons/Owlicon.png'
 
 interface LoginFormProps {
   errorMessage: string

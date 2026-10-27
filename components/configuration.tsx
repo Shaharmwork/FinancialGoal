@@ -25,10 +25,19 @@ import {
   TextButton,
   Toast,
 } from "@/components/ui/kit";
-import CalendarSaveIcon from "@/src/assets/icons/CalanderSave.png";
-import CompassIcon from "@/src/assets/icons/Compass.png";
-import InvoiceIcon from "@/src/assets/icons/Invoice.png";
-import TaxReserveIcon from "@/src/assets/icons/TaxReserveIcon.png";
+import CalendarSaveIcon from "@/src/assets/web/icons/CalanderSave.png";
+import CompassIcon from "@/src/assets/web/icons/Compass.png";
+import InvoiceIcon from "@/src/assets/web/icons/Invoice.png";
+import TaxReserveIcon from "@/src/assets/web/icons/TaxReserveIcon.png";
+import { isSupportedTaxYear, SUPPORTED_TAX_YEAR } from "@/lib/tax-engine";
+import {
+  hasSummaryChanges,
+  isSameSettingsContent,
+  mergeSavedIntoDraftSummaries,
+  rebaseDraftSettings,
+  rebaseDraftSummaries,
+  type ConflictReason,
+} from "@/lib/sync";
 import {
   getCurrentYearStats,
   getDutchPublicHolidayWeekdays,
@@ -53,6 +62,15 @@ import type {
   Settings,
 } from "@/lib/types";
 
+export type ConfigurationConflictTarget =
+  | { kind: "settings" }
+  | { kind: "month"; monthKey: string };
+
+export type ConfigurationSaveResult =
+  | { status: "saved"; settings: Settings; monthlySummaries: MonthlySummary[] }
+  | { status: "conflict"; reason: ConflictReason; target: ConfigurationConflictTarget }
+  | { status: "error"; message: string };
+
 export interface ConfigurationNavigationHandlers {
   discard: () => void;
   save: () => Promise<boolean>;
@@ -64,10 +82,16 @@ interface ConfigurationProps {
   settingsFocusRequest?: number;
   settings: Settings;
   monthlySummaries: MonthlySummary[];
+  // Resolves with what happened; drafts are only cleared after "saved".
   onSaveConfiguration: (
     settings: Settings,
     monthlySummaries: MonthlySummary[],
-  ) => Promise<void>;
+  ) => Promise<ConfigurationSaveResult>;
+  // Reloads the saved data; resolves null if that failed.
+  onReloadRemote: () => Promise<{
+    settings: Settings;
+    monthlySummaries: MonthlySummary[];
+  } | null>;
   onDeleteSavedMonthSummary: (monthKey: string) => Promise<void>;
   onRegisterNavigationHandlers?: (
     handlers: ConfigurationNavigationHandlers | null,
@@ -314,8 +338,7 @@ function getWorkLineIncome(workLine: MonthWorkLine) {
 }
 
 // Months saved before work lines existed only have month totals, so they are shown
-// as one line: as an hourly rate if hours x rate gives the total to the cent,
-// otherwise as a fixed total.
+// as one line with that total. The rate isn't guessed from hours.
 function getSummaryWorkLines(summary: MonthlySummary): MonthWorkLine[] {
   if (summary.workLines && summary.workLines.length > 0) {
     return summary.workLines;
@@ -328,17 +351,12 @@ function getSummaryWorkLines(summary: MonthlySummary): MonthWorkLine[] {
     return [];
   }
 
-  const derivedHourlyRate = hours > 0 ? roundCents(income / hours) : 0;
-  const canShowAsHourlyRate =
-    derivedHourlyRate > 0 &&
-    roundCents(derivedHourlyRate * hours) === roundCents(income);
-
   return [
     {
       label: "",
       hours: hours > 0 ? hours : null,
-      hourlyRate: canShowAsHourlyRate ? derivedHourlyRate : null,
-      totalIncome: !canShowAsHourlyRate && income > 0 ? income : null,
+      hourlyRate: null,
+      totalIncome: income > 0 ? income : null,
     },
   ];
 }
@@ -601,6 +619,7 @@ export function Configuration({
   settings,
   monthlySummaries,
   onSaveConfiguration,
+  onReloadRemote,
   onDeleteSavedMonthSummary,
   onRegisterNavigationHandlers,
   onUnsavedChangesChange,
@@ -648,22 +667,50 @@ export function Configuration({
   const [pendingMonthFocusRowKey, setPendingMonthFocusRowKey] = useState<
     string | null
   >(null);
+  const previousSavedRef = useRef<{
+    monthlySummaries: MonthlySummary[];
+    settings: Settings;
+  } | null>(null);
+  const hasHydratedDraftRef = useRef(false);
+  const [configConflict, setConfigConflict] = useState<{
+    reason: ConflictReason;
+    target: ConfigurationConflictTarget;
+  } | null>(null);
 
   useEffect(() => {
-    const savedDraft = userId ? getUserConfigurationDraft(userId) : null;
+    const previousSaved = previousSavedRef.current;
+    previousSavedRef.current = { monthlySummaries, settings };
 
-    if (savedDraft) {
-      setDraftSettings(savedDraft.settings);
+    if (!hasHydratedDraftRef.current) {
+      hasHydratedDraftRef.current = true;
+      const storedDraft = userId ? getUserConfigurationDraft(userId) : null;
+
+      setDraftSettings(
+        storedDraft
+          ? rebaseDraftSettings(undefined, settings, storedDraft.settings)
+          : settings,
+      );
       setDraftMonthlySummaries(
-        sortMonthlySummariesNewestFirst(savedDraft.monthlySummaries),
+        sortMonthlySummariesNewestFirst(
+          storedDraft
+            ? mergeSavedIntoDraftSummaries(monthlySummaries, storedDraft.monthlySummaries)
+            : monthlySummaries,
+        ),
       );
       setHasHydratedConfigurationDraft(true);
       return;
     }
 
-    setDraftSettings(settings);
-    setDraftMonthlySummaries(sortMonthlySummariesNewestFirst(monthlySummaries));
-    setHasHydratedConfigurationDraft(true);
+    // Saved data changed (a save, or a refresh): untouched parts of the draft move
+    // to the new versions; edits keep their base version so stale saves conflict.
+    setDraftSettings((currentDraft) =>
+      rebaseDraftSettings(previousSaved?.settings, settings, currentDraft),
+    );
+    setDraftMonthlySummaries((currentDraft) =>
+      sortMonthlySummariesNewestFirst(
+        rebaseDraftSummaries(previousSaved?.monthlySummaries ?? [], monthlySummaries, currentDraft),
+      ),
+    );
   }, [monthlySummaries, settings, userId]);
 
   useEffect(() => {
@@ -737,13 +784,6 @@ export function Configuration({
         return {
           title: "Choose a valid month",
           message: "Pick a valid month before saving this summary.",
-        };
-      }
-
-      if (parsedMonthKey.year < currentYear) {
-        return {
-          title: "Current year only",
-          message: "You can only add months from the current year.",
         };
       }
 
@@ -878,9 +918,8 @@ export function Configuration({
   };
 
   const hasPendingChanges =
-    JSON.stringify(draftSettings) !== JSON.stringify(settings) ||
-    JSON.stringify(sortedDraftSummaries) !==
-      JSON.stringify(sortedSavedSummaries);
+    !isSameSettingsContent(draftSettings, settings) ||
+    hasSummaryChanges(sortedSavedSummaries, sortedDraftSummaries);
 
   useEffect(() => {
     onUnsavedChangesChange?.(hasPendingChanges);
@@ -1297,6 +1336,115 @@ export function Configuration({
     }
   };
 
+  // Sends the draft; drafts are replaced by the saved data only after a confirmed save.
+  const performSave = useCallback(
+    async (nextSettings: Settings, nextSummaries: MonthlySummary[]) => {
+      const result = await onSaveConfiguration(
+        nextSettings,
+        nextSummaries.map(sanitizeMonthlySummaryForSave),
+      );
+
+      if (result.status === "saved") {
+        setDraftSettings(result.settings);
+        setDraftMonthlySummaries(sortMonthlySummariesNewestFirst(result.monthlySummaries));
+
+        if (userId) {
+          clearUserConfigurationDraft(userId);
+        }
+
+        setIsErrorMessage(false);
+        setFormMessage("Changes saved.");
+        return true;
+      }
+
+      if (result.status === "conflict") {
+        setConfigConflict({ reason: result.reason, target: result.target });
+        return false;
+      }
+
+      setIsErrorMessage(true);
+      setFormMessage(result.message);
+      return false;
+    },
+    [onSaveConfiguration, userId],
+  );
+
+  const resolveConflictWithOtherVersion = async () => {
+    const conflict = configConflict;
+    setConfigConflict(null);
+
+    if (!conflict) {
+      return;
+    }
+
+    const latest = await onReloadRemote();
+
+    if (!latest) {
+      return;
+    }
+
+    if (conflict.target.kind === "settings") {
+      setDraftSettings(latest.settings);
+    } else {
+      const { monthKey } = conflict.target;
+      const remoteSummary = latest.monthlySummaries.find(
+        (summary) => summary.monthKey === monthKey,
+      );
+      setDraftMonthlySummaries((currentDraft) =>
+        sortMonthlySummariesNewestFirst([
+          ...currentDraft.filter((summary) => summary.monthKey !== monthKey),
+          ...(remoteSummary ? [remoteSummary] : []),
+        ]),
+      );
+    }
+
+    setIsErrorMessage(false);
+    setFormMessage("Loaded the latest version.");
+  };
+
+  // Explicit choice: replace the other device's version with this draft.
+  const resolveConflictByOverwriting = async () => {
+    const conflict = configConflict;
+    setConfigConflict(null);
+
+    if (!conflict) {
+      return;
+    }
+
+    const latest = await onReloadRemote();
+
+    if (!latest) {
+      return;
+    }
+
+    let nextSettings = draftSettings;
+    let nextSummaries = sortedDraftSummaries;
+
+    if (conflict.target.kind === "settings") {
+      nextSettings = { ...draftSettings, updatedAt: latest.settings.updatedAt };
+    } else {
+      const { monthKey } = conflict.target;
+      const remoteSummary = latest.monthlySummaries.find(
+        (summary) => summary.monthKey === monthKey,
+      );
+      nextSummaries = sortedDraftSummaries.map((summary) =>
+        summary.monthKey === monthKey
+          ? { ...summary, updatedAt: remoteSummary?.updatedAt }
+          : summary,
+      );
+    }
+
+    setDraftSettings(nextSettings);
+    setDraftMonthlySummaries(nextSummaries);
+    setIsSaving(true);
+
+    try {
+      await performSave(nextSettings, nextSummaries);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const saveConfigurationDraft = useCallback(async () => {
     if (!hasPendingChanges) {
       return true;
@@ -1429,27 +1577,12 @@ export function Configuration({
     setInvalidSummaryFields({});
 
     try {
-      const summariesToSave = sortedDraftSummaries.map(
-        sanitizeMonthlySummaryForSave,
-      );
-      await onSaveConfiguration(draftSettings, summariesToSave);
-      if (userId) {
-        clearUserConfigurationDraft(userId);
-      }
-      setFormMessage("Changes saved.");
-      return true;
-    } catch (error) {
-      setIsErrorMessage(true);
-      setFormMessage(
-        error instanceof Error && error.message
-          ? error.message
-          : "Save failed.",
-      );
-      return false;
+      return await performSave(draftSettings, sortedDraftSummaries);
     } finally {
       setIsSaving(false);
     }
   }, [
+    performSave,
     draftSettings,
     entryMonthKeys,
     getMonthValidationIssue,
@@ -1560,6 +1693,38 @@ export function Configuration({
         primaryActionLabel="Remove line"
         secondaryActionLabel="Cancel"
         title="Remove this work line?"
+      />
+      <WarningModal
+        body={
+          configConflict
+            ? `${
+                configConflict.target.kind === "settings"
+                  ? "Your goal, rate or tax settings"
+                  : formatMonthKey(configConflict.target.monthKey)
+              } ${
+                configConflict.reason === "exists"
+                  ? "was also added on another device"
+                  : configConflict.reason === "deleted"
+                    ? "was deleted on another device"
+                    : "was changed on another device"
+              } after you opened it, so your change wasn't saved.\n\nYour changes are still here. Keep editing to leave them unsaved, use the other device's version, or overwrite it with yours. Overwriting replaces what the other device saved.`
+            : ""
+        }
+        extraActions={[
+          {
+            label: "Use other version",
+            onClick: () => void resolveConflictWithOtherVersion(),
+          },
+          {
+            label: "Overwrite with mine",
+            onClick: () => void resolveConflictByOverwriting(),
+            tone: "danger",
+          },
+        ]}
+        isOpen={configConflict !== null}
+        onClose={() => setConfigConflict(null)}
+        primaryActionLabel="Keep editing"
+        title="Changed on another device"
       />
       <WarningModal
         body="All configuration changes you haven't saved yet will be lost."
@@ -1717,6 +1882,12 @@ export function Configuration({
           title="Tax"
         >
           <div className="space-y-5">
+            {!isSupportedTaxYear(new Date().getFullYear()) ? (
+              <Notice title={`No tax rules for ${new Date().getFullYear()} yet`} tone="warn">
+                The app only has the {SUPPORTED_TAX_YEAR} tax rules, so it shows no tax
+                estimates for this year. Your hours, income and past months still work.
+              </Notice>
+            ) : null}
             <NumberField
               disabled={isSaving}
               help="Extra margin on top of the estimated tax, so you set aside a little more."
@@ -1906,7 +2077,12 @@ export function Configuration({
                                 monthInputRefs.current[rowKey] = node;
                               }}
                               className={inputClassName(rowInvalidFields.monthKey === true)}
-                              disabled={isSaving}
+                              disabled={isSaving || isSavedMonth}
+                              title={
+                                isSavedMonth
+                                  ? "To move a saved month, delete it and add the other month."
+                                  : undefined
+                              }
                               type="month"
                               value={summary.monthKey}
                               onChange={(event) =>
@@ -2019,7 +2195,7 @@ export function Configuration({
                                         <label className="block min-w-0 flex-1">
                                           <FieldLabel>Label · optional</FieldLabel>
                                           <input
-                                            className={inputClassName(false, "py-2.5 text-sm")}
+                                            className={inputClassName(false, "py-2.5")}
                                             disabled={isSaving}
                                             placeholder="e.g. Handyman"
                                             type="text"
@@ -2042,7 +2218,7 @@ export function Configuration({
                                         <label className="block min-w-0">
                                           <FieldLabel>Hours</FieldLabel>
                                           <input
-                                            className={inputClassName(false, "px-3 py-2.5 text-sm")}
+                                            className={inputClassName(false, "px-3 py-2.5")}
                                             disabled={isSaving}
                                             inputMode="decimal"
                                             min="0"
@@ -2062,7 +2238,7 @@ export function Configuration({
                                         <label className={cx("block min-w-0 transition", isUsingLineTotal && "opacity-50")}>
                                           <FieldLabel>Rate €/h</FieldLabel>
                                           <input
-                                            className={inputClassName(false, "px-3 py-2.5 text-sm")}
+                                            className={inputClassName(false, "px-3 py-2.5")}
                                             disabled={isSaving}
                                             inputMode="decimal"
                                             min="0"
@@ -2082,7 +2258,7 @@ export function Configuration({
                                         <label className="block min-w-0">
                                           <FieldLabel>Total €</FieldLabel>
                                           <input
-                                            className={inputClassName(false, "px-3 py-2.5 text-sm")}
+                                            className={inputClassName(false, "px-3 py-2.5")}
                                             disabled={isSaving}
                                             inputMode="decimal"
                                             min="0"

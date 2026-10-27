@@ -107,6 +107,10 @@ function readNullableBoolean(value: unknown) {
   return typeof value === 'boolean' ? value : null
 }
 
+function readPricingMode(value: unknown) {
+  return value === 'hourly' || value === 'fixed' ? value : null
+}
+
 function readMonthType(value: unknown) {
   return value === 'employment' ? 'employment' : 'business'
 }
@@ -136,6 +140,7 @@ export function normalizeWorkItem(value: unknown, fallbackLineIndex = 0): WorkIt
     hourlyRate: readNullableNumber(value.hourlyRate ?? value.hourly_rate),
     invoicedIncome,
     lineIndex: Math.trunc(lineIndex),
+    pricingMode: readPricingMode(value.pricingMode ?? value.pricing_mode),
   }
 }
 
@@ -161,6 +166,7 @@ export function normalizeSettings(value: unknown): Settings {
       value.qualifiesForSelfEmployedDeduction,
     ),
     qualifiesForStartersDeduction: readNullableBoolean(value.qualifiesForStartersDeduction),
+    ...(readString(value.updatedAt) ? { updatedAt: readString(value.updatedAt) } : {}),
     vacationDaysPerYear: readNullableNumber(value.vacationDaysPerYear),
   }
 }
@@ -199,6 +205,11 @@ export function normalizeEntry(value: unknown): DailyEntry | null {
     note: readString(value.note),
     source: readString(value.source),
     ...(workItems && workItems.length > 0 ? { workItems } : {}),
+    hourlyRate: readNullableNumber(value.hourlyRate ?? value.hourly_rate),
+    pricingMode: readPricingMode(value.pricingMode ?? value.pricing_mode),
+    ...(readString(value.updatedAt ?? value.updated_at)
+      ? { updatedAt: readString(value.updatedAt ?? value.updated_at) }
+      : {}),
   }
 }
 
@@ -239,6 +250,9 @@ export function normalizeMonthlySummary(value: unknown): MonthlySummary | null {
     monthType,
     invoicedIncome: readNullableNumber(value.invoicedIncome ?? value.income),
     ...(workLines.length > 0 ? { workLines } : {}),
+    ...(readString(value.updatedAt ?? value.updated_at)
+      ? { updatedAt: readString(value.updatedAt ?? value.updated_at) }
+      : {}),
     expenses: readNullableNumber(value.expenses ?? value.expense),
     hours: readNullableNumber(value.hours),
     grossSalary: readNullableNumber(value.grossSalary),
