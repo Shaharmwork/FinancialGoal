@@ -12,6 +12,8 @@ import {
 } from "@/components/daily-log";
 import { Dashboard } from "@/components/dashboard";
 import { LoginForm } from "@/components/login-form";
+import { PhoneStage } from "@/components/phone-stage";
+import { Toast } from "@/components/ui/kit";
 import { WarningModal } from "@/components/warning-modal";
 import {
   loadRemoteAppData,
@@ -19,6 +21,7 @@ import {
   saveMonthlySummariesToSupabase,
   saveSettingsToSupabase,
 } from "@/lib/app-data-store";
+import { toDateKey } from "@/lib/calculations";
 import { starterStoredState } from "@/lib/default-state";
 import {
   clearStoredUiPreferences,
@@ -38,11 +41,6 @@ import {
 } from "@/lib/supabase";
 import type { DailyEntry, MonthlySummary, Screen, Settings, WorkItem } from "@/lib/types";
 
-const navItems: Array<{ id: Screen; label: string }> = [
-  { id: "dashboard", label: "Home" },
-  { id: "daily-log", label: "Report" },
-  { id: "configuration", label: "Configuration" },
-];
 const CONFIG_SCREEN_INTENT_KEY = "configuration-screen-intent";
 const CONFIG_SCREEN_FOCUS_TARGET_KEY = "configuration-screen-focus-target";
 const CONFIG_SCREEN_TARGET_MONTH_KEY = "configuration-screen-target-month";
@@ -112,6 +110,21 @@ function clearBrowserSessionState() {
   clearStoredUiPreferences();
 }
 
+function keepSessionForSameUser(
+  previousSession: Session | null,
+  nextSession: Session | null,
+) {
+  if (
+    previousSession &&
+    nextSession &&
+    previousSession.user.id === nextSession.user.id
+  ) {
+    return previousSession;
+  }
+
+  return nextSession;
+}
+
 function cloneEntries(entries: DailyEntry[]) {
   return entries.map((entry) => ({
     ...entry,
@@ -179,7 +192,6 @@ function areEntriesEqual(left: DailyEntry[], right: DailyEntry[]) {
         (rightEntry.dayStatus ?? "worked") &&
       leftEntry.hours === rightEntry.hours &&
       leftEntry.invoicedIncome === rightEntry.invoicedIncome &&
-      leftEntry.paidIncome === rightEntry.paidIncome &&
       leftEntry.expenses === rightEntry.expenses &&
       (leftEntry.note ?? "") === (rightEntry.note ?? "") &&
       (leftEntry.source ?? "") === (rightEntry.source ?? "") &&
@@ -239,7 +251,8 @@ function getEmploymentSummaryConflictMonthKeys(
 }
 
 export default function Home() {
-  const todayDateKey = new Date().toISOString().slice(0, 10);
+  // Local date: toISOString() is UTC and lags a day between midnight and 02:00 in NL.
+  const todayDateKey = toDateKey(new Date());
   const [currentScreen, setCurrentScreen] = useState<Screen>(
     starterStoredState.currentScreen,
   );
@@ -297,6 +310,7 @@ export default function Home() {
   >(null);
   const [pendingScreen, setPendingScreen] = useState<Screen | null>(null);
   const [toastErrorMessage, setToastErrorMessage] = useState("");
+  const [entriesSaveAttempt, setEntriesSaveAttempt] = useState(0);
   const [hasHydratedReportDraftEntries, setHasHydratedReportDraftEntries] =
     useState(false);
   const [hasUnsavedReportFieldDrafts, setHasUnsavedReportFieldDrafts] =
@@ -353,7 +367,9 @@ export default function Home() {
 
         hasResolvedSession = true;
         window.clearTimeout(fallbackTimer);
-        setSession(currentSession);
+        setSession((previousSession) =>
+          keepSessionForSameUser(previousSession, currentSession),
+        );
         setHasCheckedSession(true);
       })
       .catch((error) => {
@@ -378,7 +394,12 @@ export default function Home() {
 
       hasResolvedSession = true;
       window.clearTimeout(fallbackTimer);
-      setSession(nextSession);
+      // Supabase re-emits SIGNED_IN / TOKEN_REFRESHED when the tab regains
+      // focus. Keep the same session object for the same user so the data
+      // reload effects don't re-run and reset the screen (and its scroll).
+      setSession((previousSession) =>
+        keepSessionForSameUser(previousSession, nextSession),
+      );
       setToastErrorMessage("");
       setHasCheckedSession(true);
     });
@@ -525,17 +546,38 @@ export default function Home() {
       return;
     }
 
+    let retryTimeoutId: number | undefined;
+
     void saveDailyEntriesToSupabase(entries)
       .then(() => {
         lastPersistedEntriesRef.current = {
           entries: cloneEntries(entries),
           userId,
         };
+        setEntriesSaveAttempt(0);
       })
       .catch((error) => {
         console.error("[Financial Goal] Failed to save daily entries.", error);
+        // The reports stay on screen; retry a few times before giving up.
+        if (entriesSaveAttempt < 3) {
+          setToastErrorMessage("Couldn't save your reports. Retrying…");
+          retryTimeoutId = window.setTimeout(() => {
+            setEntriesSaveAttempt((currentValue) => currentValue + 1);
+          }, 4000);
+          return;
+        }
+
+        setToastErrorMessage(
+          "Your reports couldn't be saved. Check your connection and save again.",
+        );
       });
-  }, [entries, hasLoadedRemoteState, loadedRemoteUserId, session]);
+
+    return () => {
+      if (retryTimeoutId !== undefined) {
+        window.clearTimeout(retryTimeoutId);
+      }
+    };
+  }, [entries, entriesSaveAttempt, hasLoadedRemoteState, loadedRemoteUserId, session]);
 
   useEffect(() => {
     const userId = session?.user?.id;
@@ -586,10 +628,6 @@ export default function Home() {
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: "auto" });
-  }, [currentScreen]);
-
-  useEffect(() => {
-    console.log("[Financial Goal] currentScreen changed:", currentScreen);
   }, [currentScreen]);
 
   const handleUpsertEntry = useCallback(
@@ -909,6 +947,7 @@ export default function Home() {
         onSaveEntries={handleSaveReportEntries}
         onUnsavedDayInputDraftsChange={setHasUnsavedReportFieldDrafts}
         onBackfillMissingMonth={handleBackfillMissingMonth}
+        onDiscardEntries={handleDiscardReportEntries}
         reportResetRequest={reportResetRequest}
         savedEntries={entries}
         settings={settings}
@@ -929,6 +968,8 @@ export default function Home() {
         }
         onSaveConfiguration={handleSaveConfiguration}
         onDeleteSavedMonthSummary={handleDeleteSavedMonthSummary}
+        onSignOut={() => void handleSignOut()}
+        isSigningOut={isSigningOut}
         onUnsavedChangesChange={setHasUnsavedConfigurationChanges}
         settings={settings}
         userId={session?.user?.id}
@@ -955,17 +996,12 @@ export default function Home() {
 
   if (!session) {
     return (
-      <div className="relative isolate min-h-screen overflow-x-hidden bg-background text-foreground">
-        <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-72 bg-[radial-gradient(circle_at_top_left,rgba(255,216,107,0.35),transparent_36%),radial-gradient(circle_at_top_right,rgba(136,201,255,0.28),transparent_32%),radial-gradient(circle_at_30%_75%,rgba(201,188,255,0.22),transparent_26%)]" />
-
-        <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-[30rem] flex-col px-4 pt-4 sm:px-5">
-          <div className="mb-4 rounded-[1.2rem] border border-border bg-amber-100 px-4 py-3 text-center text-sm font-semibold tracking-[0.16em] text-amber-900">
-            {hasCheckedSession ? "SIGN IN" : "AUTH"}
-          </div>
+      <div className="relative isolate min-h-screen overflow-x-hidden text-foreground">
+          <main className="relative z-10 mx-auto flex min-h-screen w-full max-w-[30rem] flex-col justify-center px-4 py-10 sm:px-5">
           {!hasCheckedSession ? (
-            <section className="mb-4 w-full rounded-[1.25rem] border border-border bg-card px-4 py-3 text-sm text-muted-foreground shadow-sm">
-              Checking session… You can already sign in below if needed.
-            </section>
+            <p className="mb-4 text-center text-sm text-[#b0947a]">
+              Checking your session…
+            </p>
           ) : null}
           <section className="w-full">
             <LoginForm
@@ -976,94 +1012,43 @@ export default function Home() {
             />
           </section>
         </main>
-        <ErrorToast
+        <Toast
           message={toastErrorMessage}
           onDismiss={() => setToastErrorMessage("")}
+          tone="error"
         />
       </div>
     );
   }
 
   return (
-    <div className="relative isolate min-h-screen overflow-x-hidden bg-background text-foreground">
-      <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-72 bg-[radial-gradient(circle_at_top_left,rgba(255,216,107,0.35),transparent_36%),radial-gradient(circle_at_top_right,rgba(136,201,255,0.28),transparent_32%),radial-gradient(circle_at_30%_75%,rgba(201,188,255,0.22),transparent_26%)]" />
-
-      {!isDashboardScreen ? (
-        <nav className="fixed inset-x-0 top-0 z-[160] px-4 pt-[calc(env(safe-area-inset-top)+0.75rem)]">
-          <div className="mx-auto flex max-w-[30rem] items-center justify-between gap-3">
-            <div className="grid grid-cols-3 gap-2 rounded-[1.6rem] border border-border bg-card/95 p-1.5 shadow-[0_18px_36px_rgba(24,32,48,0.14)] backdrop-blur">
-              {navItems.map((item) => {
-                const isActive = currentScreen === item.id;
-
-                return (
-                  <button
-                    key={item.id}
-                    aria-current={isActive ? "page" : undefined}
-                    aria-label={item.label}
-                    className={`inline-flex h-11 w-11 items-center justify-center rounded-[1.1rem] transition ${
-                      isActive
-                        ? "bg-[linear-gradient(135deg,rgba(255,216,107,0.95),rgba(255,143,122,0.85))] text-foreground shadow-sm"
-                        : "bg-transparent text-muted-foreground hover:bg-muted/70"
-                    }`}
-                    onClick={() => handleScreenChange(item.id)}
-                    type="button"
-                  >
-                    <span aria-hidden="true">
-                      {item.id === "dashboard" ? (
-                        <HomeIcon />
-                      ) : item.id === "daily-log" ? (
-                        <ClockIcon />
-                      ) : (
-                        <CogIcon />
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {currentScreen === "configuration" ? (
-              <button
-                aria-label={isSigningOut ? "Signing out" : "Sign out"}
-                className="inline-flex h-[42px] w-[42px] items-center justify-center rounded-full border border-[#f1ba6b]/45 bg-[#0f0b08]/92 text-[#ffd791] shadow-[0_0_16px_rgba(255,141,45,0.14),0_8px_18px_rgba(0,0,0,0.34)] transition hover:bg-[#19120d] disabled:opacity-60"
-                disabled={isSigningOut}
-                onClick={() => void handleSignOut()}
-                type="button"
-              >
-                <SignOutIcon />
-              </button>
-            ) : null}
-          </div>
-        </nav>
-      ) : null}
-
-      <main
-        className={
-          isDashboardScreen
-            ? "relative z-10 min-h-screen w-full"
-            : "relative z-10 mx-auto flex min-h-screen w-full max-w-[30rem] flex-col px-4 pb-[calc(3rem+env(safe-area-inset-bottom))] pt-[calc(env(safe-area-inset-top)+5.75rem)] sm:px-5"
-        }
-      >
-        <section
-          key={currentScreen}
-          data-screen={currentScreen}
-          className="w-full"
-        >
-          {!hasLoadedRemoteState ? (
-            <div className="rounded-[1.9rem] border border-border bg-card p-5 shadow-sm">
-              <p className="text-sm text-muted-foreground">
-                Loading your data...
-              </p>
-            </div>
-          ) : (
-            activeScreen
-          )}
-        </section>
+    <div className="relative isolate min-h-screen overflow-x-hidden text-foreground">
+      <main className="relative z-10 min-h-screen w-full" data-screen={currentScreen}>
+        {isDashboardScreen && hasLoadedRemoteState ? (
+          activeScreen
+        ) : (
+          // Report and Configuration share the dashboard's phone stage and dock.
+          <PhoneStage
+            key={currentScreen}
+            active={currentScreen}
+            onNavigate={handleScreenChange}
+            variant="screen"
+          >
+            {!hasLoadedRemoteState ? (
+              <div className="rounded-[22px] border border-[#a8744a]/45 bg-[#18120e] p-5 text-sm text-[#b0947a]">
+                Loading your data…
+              </div>
+            ) : (
+              activeScreen
+            )}
+          </PhoneStage>
+        )}
       </main>
 
-      <ErrorToast
+      <Toast
         message={toastErrorMessage}
         onDismiss={() => setToastErrorMessage("")}
+        tone="error"
       />
       <WarningModal
         body="You have unsaved daily reports. Do you want to save them?"
@@ -1225,71 +1210,6 @@ export default function Home() {
   );
 }
 
-function ErrorToast({
-  message,
-  onDismiss,
-}: {
-  message: string;
-  onDismiss: () => void;
-}) {
-  if (!message) {
-    return null;
-  }
-
-  return (
-    <div className="pointer-events-none fixed inset-x-0 top-[calc(env(safe-area-inset-top)+4.75rem)] z-[200] px-4">
-      <div className="pointer-events-auto mx-auto flex w-full max-w-[30rem] items-start gap-3 rounded-[1.3rem] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900 shadow-[0_18px_36px_rgba(24,32,48,0.14)]">
-        <div className="mt-0.5 shrink-0">
-          <ToastWarningIcon />
-        </div>
-        <p className="flex-1">{message}</p>
-        <button
-          aria-label="Dismiss error message"
-          className="shrink-0 rounded-full p-1 text-rose-700 transition hover:bg-rose-100"
-          onClick={onDismiss}
-          type="button"
-        >
-          <ToastCloseIcon />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ToastWarningIcon() {
-  return (
-    <svg aria-hidden="true" className="h-5 w-5" fill="none" viewBox="0 0 24 24">
-      <path
-        d="M12 3.8 3.9 18a1.2 1.2 0 0 0 1 1.8h14.2a1.2 1.2 0 0 0 1-1.8L12 3.8Z"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.7"
-      />
-      <path
-        d="M12 9v4.3"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.7"
-      />
-      <circle cx="12" cy="16.7" r="1" fill="currentColor" />
-    </svg>
-  );
-}
-
-function ToastCloseIcon() {
-  return (
-    <svg aria-hidden="true" className="h-4 w-4" fill="none" viewBox="0 0 24 24">
-      <path
-        d="M6 6 18 18M18 6 6 18"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.8"
-      />
-    </svg>
-  );
-}
-
 function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -1335,68 +1255,4 @@ function getSignInErrorMessage(error: unknown) {
   }
 
   return `Unknown sign-in error.${rawMessage ? ` ${getErrorMessage(error, "")}` : ""}`.trim();
-}
-
-function HomeIcon() {
-  return (
-    <svg className="h-[1.1rem] w-[1.1rem]" fill="none" viewBox="0 0 24 24">
-      <path
-        d="M4 10.6L12 4l8 6.6v8.4a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.8"
-      />
-    </svg>
-  );
-}
-
-function ClockIcon() {
-  return (
-    <svg className="h-[1.1rem] w-[1.1rem]" fill="none" viewBox="0 0 24 24">
-      <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.8" />
-      <path
-        d="M12 7.8v4.5l3.2 1.9"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.8"
-      />
-    </svg>
-  );
-}
-
-function CogIcon() {
-  return (
-    <svg className="h-[1.1rem] w-[1.1rem]" fill="none" viewBox="0 0 24 24">
-      <path
-        d="M12 8.7a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6Zm7 3.3-.9-.5.1-1.1a1.2 1.2 0 0 0-.8-1.2l-1-.3-.4-1a1.2 1.2 0 0 0-1.3-.7l-1.1.1-.6-.9a1.2 1.2 0 0 0-1.4-.4l-1 .4-1-.4a1.2 1.2 0 0 0-1.4.4l-.6.9-1.1-.1a1.2 1.2 0 0 0-1.3.7l-.4 1-1 .3a1.2 1.2 0 0 0-.8 1.2l.1 1.1-.9.5a1.2 1.2 0 0 0-.5 1.4l.4 1 .1 1.1a1.2 1.2 0 0 0 .8 1.2l1 .3.4 1a1.2 1.2 0 0 0 1.3.7l1.1-.1.6.9a1.2 1.2 0 0 0 1.4.4l1-.4 1 .4a1.2 1.2 0 0 0 1.4-.4l.6-.9 1.1.1a1.2 1.2 0 0 0 1.3-.7l.4-1 1-.3a1.2 1.2 0 0 0 .8-1.2l-.1-1.1.9-.5a1.2 1.2 0 0 0 .5-1.4l-.4-1Z"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.2"
-      />
-    </svg>
-  );
-}
-
-function SignOutIcon() {
-  return (
-    <svg className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24">
-      <path
-        d="M10 5.75H7.75A1.75 1.75 0 0 0 6 7.5v9a1.75 1.75 0 0 0 1.75 1.75H10"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.8"
-      />
-      <path
-        d="M13 8.5 17.5 12 13 15.5M17.25 12H10"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.8"
-      />
-    </svg>
-  );
 }

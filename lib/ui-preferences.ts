@@ -20,8 +20,8 @@ export type ReportWorkItemDraft = {
 export type ReportDayFormDraft = {
   expenses: string
   hours: string
-  invoicedIncome: string
-  paidIncome: string
+  hourlyRate: string
+  totalIncome: string
   workItems?: ReportWorkItemDraft[]
 }
 
@@ -241,8 +241,10 @@ export function getUserReportDayFormDrafts(
     currentValue[dateKey] = {
       expenses: typeof draft.expenses === 'string' ? draft.expenses : '',
       hours: typeof draft.hours === 'string' ? draft.hours : '',
-      invoicedIncome: typeof draft.invoicedIncome === 'string' ? draft.invoicedIncome : '',
-      paidIncome: typeof draft.paidIncome === 'string' ? draft.paidIncome : '',
+      hourlyRate: typeof draft.hourlyRate === 'string' ? draft.hourlyRate : '',
+      // Legacy invoicedIncome / paidIncome draft values are dropped on purpose: they were
+      // mostly auto-copied entry totals and would otherwise show up as a total override.
+      totalIncome: typeof draft.totalIncome === 'string' ? draft.totalIncome : '',
       ...(workItems && workItems.length > 0 ? { workItems } : {}),
     }
 

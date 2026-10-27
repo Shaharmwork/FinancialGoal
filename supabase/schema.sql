@@ -16,6 +16,9 @@ create table if not exists public.app_settings (
 alter table public.app_settings
   add column if not exists vacation_days_per_year numeric;
 
+alter table public.app_settings
+  add column if not exists qualifies_for_starters_deduction boolean;
+
 create table if not exists public.daily_entries (
   id text primary key,
   user_id uuid not null,
@@ -75,6 +78,11 @@ alter table public.monthly_summaries
   add column if not exists gross_salary numeric,
   add column if not exists net_salary_received numeric,
   add column if not exists tax_already_withheld numeric;
+
+-- Business months can be split into lines of { label, hours, hourlyRate, totalIncome }.
+-- hours and invoiced_income stay the month totals of those lines.
+alter table public.monthly_summaries
+  add column if not exists work_lines jsonb;
 
 alter table public.monthly_summaries
   alter column hours drop not null,

@@ -2,23 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import Image, { type StaticImageData } from "next/image";
-import CleanDash from "@/src/assets/backgrounds/CleanDash.png";
 import BriefcaseIcon from "@/src/assets/icons/BreifcaseIcon.png";
 import CalendarSaveIcon from "@/src/assets/icons/CalanderSave.png";
-import CenterHighlightButton from "@/src/assets/icons/CenterHighlightButton.png";
 import SandClockIcon from "@/src/assets/icons/SandClock.png";
 import CoinsBeforeTaxIcon from "@/src/assets/icons/CoinsBeforeTaxIcon.png";
-import ConfigurationIcon from "@/src/assets/icons/ConfigurationIcon.png";
-import GapIcon from "@/src/assets/icons/GapIcon.png";
+import ClockIcon from "@/src/assets/icons/ClockIcon.png";
 import CompassIcon from "@/src/assets/icons/Compass.png";
 import InvoiceIcon from "@/src/assets/icons/Invoice.png";
-import LeftHighlightButton from "@/src/assets/icons/LeftHighlightButton.png";
-import OwlIcon from "@/src/assets/icons/Owlicon.png";
-import ReportIcon from "@/src/assets/icons/ReportIcon.png";
-import RightHighlightButton from "@/src/assets/icons/RightHighlightButton.png";
 import SliderButton from "@/src/assets/icons/SliderButton.png";
 import SliderFill from "@/src/assets/icons/SliderFill.png";
 import TaxReserveIcon from "@/src/assets/icons/TaxReserveIcon.png";
+import { PhoneStage, STAGE_WIDTH } from "@/components/phone-stage";
 import type { DailyEntry, MonthlySummary, Screen, Settings } from "@/lib/types";
 import {
   getSetupCompleteness,
@@ -27,7 +21,9 @@ import {
   getCurrentYearStats,
   getEarliestMissingCurrentMonthWeekday,
   getEarliestMissingPreviousMonthWeekday,
+  getEntryInvoicedIncome,
   getMissingPreviousMonthSummaryKeys,
+  toDateKey,
 } from "@/lib/calculations";
 import {
   formatCurrency,
@@ -36,9 +32,8 @@ import {
   formatNumber,
 } from "@/lib/formatters";
 
-const STAGE_WIDTH = 390;
-const STAGE_HEIGHT = 844;
-const STAGE_VIEWPORT_PADDING = 16;
+// Hours rule (urencriterium) for the self-employed and starters' deductions.
+const HOURS_RULE = 1225;
 const CONFIG_SCREEN_INTENT_KEY = "configuration-screen-intent";
 const CONFIG_SCREEN_FOCUS_TARGET_KEY = "configuration-screen-focus-target";
 const DASHBOARD_ALERT_PULSE_DISABLED_KEY = "dashboard-alert-pulse-disabled";
@@ -76,8 +71,8 @@ const DASHBOARD_POS = {
     hoursLeftOffsetY: 0,
     workedOffsetX: 0,
     workedOffsetY: 0,
-    goalOffsetX: -2,
-    goalOffsetY: 0,
+    paceOffsetX: -2,
+    paceOffsetY: 0,
     invoicedOffsetX: -1,
     invoicedOffsetY: 0,
 
@@ -87,9 +82,9 @@ const DASHBOARD_POS = {
     workedIconOffsetX: -6,
     workedIconOffsetY: -2,
     workedIconSize: 34,
-    goalIconOffsetX: 0,
-    goalIconOffsetY: -2,
-    goalIconSize: 34,
+    paceIconOffsetX: 0,
+    paceIconOffsetY: -2,
+    paceIconSize: 34,
     invoicedIconOffsetX: -1,
     invoicedIconOffsetY: 0,
     invoicedIconSize: 30,
@@ -98,8 +93,8 @@ const DASHBOARD_POS = {
     hoursLeftValueOffsetY: 0,
     workedValueOffsetX: 0,
     workedValueOffsetY: 0,
-    goalValueOffsetX: 0,
-    goalValueOffsetY: 0,
+    paceValueOffsetX: 0,
+    paceValueOffsetY: 0,
     invoicedValueOffsetX: 0,
     invoicedValueOffsetY: 0,
   },
@@ -227,58 +222,13 @@ const DASHBOARD_POS = {
     taxToSaveValueSize: 13,
   },
 
-  // Bottom nav: dock frame plus per-slot offsets.
-  nav: {
-    bottom:10,
-    side: 60,
-    height: 101,
-    gap: 45,
-
-    selectedCoverOffsetX: 0.5,
-    selectedCoverOffsetY: 0,
-    selectedCoverScaleX: 2.02,
-    selectedCoverScaleY: 1.03,
-    selectedCoverRadius: 9,
-
-    leftOffsetX: 0,
-    leftOffsetY: 0,
-    centerOffsetX: 0,
-    centerOffsetY: 0,
-    rightOffsetX: 0,
-    rightOffsetY: 0,
-
-    reportIconOffsetX: -10,
-    reportIconOffsetY: 0,
-    reportIconScale: 1.5,
-    dashboardIconOffsetX: 0,
-    dashboardIconOffsetY: 0,
-    dashboardIconScale: 2.5,
-    configurationIconOffsetX: 10,
-    configurationIconOffsetY: 0,
-    configurationIconScale: 2,
-
-    reportLabelOffsetX: -10,
-    reportLabelOffsetY: 20,
-    reportLabelScale: 1.6,
-    dashboardLabelOffsetX: 0,
-    dashboardLabelOffsetY: 20,
-    dashboardLabelScale: 2,
-    configurationLabelOffsetX: 15,
-    configurationLabelOffsetY: 20,
-    configurationLabelScale: 1.6,
-  },
 } as const;
 
-type WeeklyItemId = "hoursLeft" | "worked" | "goal" | "invoiced";
-type NavItemId = "report" | "dashboard" | "configuration";
+type WeeklyItemId = "hoursLeft" | "worked" | "pace" | "invoiced";
 type TaxItemId = "taxReserved" | "taxToSave";
 
 function getOffsetTransform(offsetX = 0, offsetY = 0) {
   return `translate(${offsetX}px, ${offsetY}px)`;
-}
-
-function getOffsetScaleTransform(offsetX = 0, offsetY = 0, scale = 1) {
-  return `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
 }
 
 function getTrayPartTransform(
@@ -331,8 +281,8 @@ function getWeeklyItemOffsetY(id: WeeklyItemId) {
     return DASHBOARD_POS.weekly.workedOffsetY;
   }
 
-  if (id === "goal") {
-    return DASHBOARD_POS.weekly.goalOffsetY;
+  if (id === "pace") {
+    return DASHBOARD_POS.weekly.paceOffsetY;
   }
 
   return DASHBOARD_POS.weekly.invoicedOffsetY;
@@ -347,8 +297,8 @@ function getWeeklyItemOffsetX(id: WeeklyItemId) {
     return DASHBOARD_POS.weekly.workedOffsetX;
   }
 
-  if (id === "goal") {
-    return DASHBOARD_POS.weekly.goalOffsetX;
+  if (id === "pace") {
+    return DASHBOARD_POS.weekly.paceOffsetX;
   }
 
   return DASHBOARD_POS.weekly.invoicedOffsetX;
@@ -363,8 +313,8 @@ function getWeeklyIconOffsetY(id: WeeklyItemId) {
     return DASHBOARD_POS.weekly.workedIconOffsetY;
   }
 
-  if (id === "goal") {
-    return DASHBOARD_POS.weekly.goalIconOffsetY;
+  if (id === "pace") {
+    return DASHBOARD_POS.weekly.paceIconOffsetY;
   }
 
   return DASHBOARD_POS.weekly.invoicedIconOffsetY;
@@ -379,8 +329,8 @@ function getWeeklyIconOffsetX(id: WeeklyItemId) {
     return DASHBOARD_POS.weekly.workedIconOffsetX;
   }
 
-  if (id === "goal") {
-    return DASHBOARD_POS.weekly.goalIconOffsetX;
+  if (id === "pace") {
+    return DASHBOARD_POS.weekly.paceIconOffsetX;
   }
 
   return DASHBOARD_POS.weekly.invoicedIconOffsetX;
@@ -395,8 +345,8 @@ function getWeeklyIconSize(id: WeeklyItemId) {
     return DASHBOARD_POS.weekly.workedIconSize;
   }
 
-  if (id === "goal") {
-    return DASHBOARD_POS.weekly.goalIconSize;
+  if (id === "pace") {
+    return DASHBOARD_POS.weekly.paceIconSize;
   }
 
   return DASHBOARD_POS.weekly.invoicedIconSize;
@@ -411,8 +361,8 @@ function getWeeklyValueOffsetY(id: WeeklyItemId) {
     return DASHBOARD_POS.weekly.workedValueOffsetY;
   }
 
-  if (id === "goal") {
-    return DASHBOARD_POS.weekly.goalValueOffsetY;
+  if (id === "pace") {
+    return DASHBOARD_POS.weekly.paceValueOffsetY;
   }
 
   return DASHBOARD_POS.weekly.invoicedValueOffsetY;
@@ -427,8 +377,8 @@ function getWeeklyValueOffsetX(id: WeeklyItemId) {
     return DASHBOARD_POS.weekly.workedValueOffsetX;
   }
 
-  if (id === "goal") {
-    return DASHBOARD_POS.weekly.goalValueOffsetX;
+  if (id === "pace") {
+    return DASHBOARD_POS.weekly.paceValueOffsetX;
   }
 
   return DASHBOARD_POS.weekly.invoicedValueOffsetX;
@@ -469,78 +419,6 @@ function getWeeklyValueFontSize(id: WeeklyItemId, value: string) {
     minFontSize,
     Math.min(maxFontSize, availableWidth / (value.length * characterWidthRatio)),
   );
-}
-
-function getNavIconOffsetX(id: NavItemId) {
-  if (id === "report") {
-    return DASHBOARD_POS.nav.reportIconOffsetX;
-  }
-
-  if (id === "dashboard") {
-    return DASHBOARD_POS.nav.dashboardIconOffsetX;
-  }
-
-  return DASHBOARD_POS.nav.configurationIconOffsetX;
-}
-
-function getNavIconOffsetY(id: NavItemId) {
-  if (id === "report") {
-    return DASHBOARD_POS.nav.reportIconOffsetY;
-  }
-
-  if (id === "dashboard") {
-    return DASHBOARD_POS.nav.dashboardIconOffsetY;
-  }
-
-  return DASHBOARD_POS.nav.configurationIconOffsetY;
-}
-
-function getNavIconScale(id: NavItemId) {
-  if (id === "report") {
-    return DASHBOARD_POS.nav.reportIconScale;
-  }
-
-  if (id === "dashboard") {
-    return DASHBOARD_POS.nav.dashboardIconScale;
-  }
-
-  return DASHBOARD_POS.nav.configurationIconScale;
-}
-
-function getNavLabelOffsetX(id: NavItemId) {
-  if (id === "report") {
-    return DASHBOARD_POS.nav.reportLabelOffsetX;
-  }
-
-  if (id === "dashboard") {
-    return DASHBOARD_POS.nav.dashboardLabelOffsetX;
-  }
-
-  return DASHBOARD_POS.nav.configurationLabelOffsetX;
-}
-
-function getNavLabelOffsetY(id: NavItemId) {
-  if (id === "report") {
-    return DASHBOARD_POS.nav.reportLabelOffsetY;
-  }
-
-  if (id === "dashboard") {
-    return DASHBOARD_POS.nav.dashboardLabelOffsetY;
-  }
-
-  return DASHBOARD_POS.nav.configurationLabelOffsetY;
-}
-
-function getNavLabelScale(id: NavItemId) {
-  if (id === "report") {
-    return DASHBOARD_POS.nav.reportLabelScale;
-  }
-
-  if (id === "dashboard") {
-    return DASHBOARD_POS.nav.dashboardLabelScale;
-  }
-
-  return DASHBOARD_POS.nav.configurationLabelScale;
 }
 
 function getTaxIconSize(id: TaxItemId) {
@@ -610,7 +488,6 @@ export function Dashboard({
   settings,
   shouldShowGreeting = false,
 }: DashboardProps) {
-  const stageScale = useDashboardStageScale();
   const greetingTimeoutRef = useRef<number | null>(null);
   const [isGreetingVisible, setIsGreetingVisible] = useState(false);
   const [isAlertTrayCollapsed, setIsAlertTrayCollapsed] = useState(true);
@@ -620,6 +497,14 @@ export function Dashboard({
   const now = new Date();
   const week = getCurrentWeekStats(entries, settings);
   const invoicedThisWeek = getCurrentWeekInvoicedIncome(entries, now);
+  const remainingWorkdays = getRemainingWorkdaysThisWeek(entries, now);
+  // Hours still to work per remaining weekday to reach the weekly goal.
+  const neededHoursPerDay =
+    week.hoursLeft <= 0
+      ? "0h"
+      : remainingWorkdays === 0
+        ? "—"
+        : formatHours(week.hoursLeft / remainingWorkdays);
   const month = getCurrentMonthStats(entries, monthlySummaries, settings);
   const year = getCurrentYearStats(entries, monthlySummaries, settings);
   const projectedTakeHome = year.projectedAnnualNet;
@@ -638,6 +523,7 @@ export function Dashboard({
   const earliestMissingCurrentMonthDay = getEarliestMissingCurrentMonthWeekday(
     entries,
     now,
+    monthlySummaries,
   );
   const shouldShowCurrentMonthReminder =
     earliestMissingCurrentMonthDay !== undefined;
@@ -830,24 +716,7 @@ export function Dashboard({
   }, []);
 
   return (
-    <div className="fixed inset-0 z-[180] overflow-hidden bg-black text-[#f7ebda]">
-      <div className="relative h-[100dvh] w-full overflow-hidden bg-black">
-        <div
-          className="absolute left-1/2 top-1/2 h-[844px] w-[390px] overflow-hidden rounded-[2rem] bg-[#050505] shadow-[0_28px_80px_rgba(0,0,0,0.72)]"
-          style={{
-            transform: `translate(-50%, -50%) scale(${stageScale})`,
-            transformOrigin: "center center",
-          }}
-        >
-          <Image
-            alt=""
-            className="pointer-events-none object-fill"
-            fill
-            priority
-            sizes="390px"
-            src={CleanDash}
-          />
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,219,172,0.05),transparent_34%),linear-gradient(180deg,rgba(0,0,0,0.03),rgba(0,0,0,0.12))]" />
+    <PhoneStage active="dashboard" onNavigate={onNavigate} variant="artwork">
           <DashboardBannerAnimationStyles />
 
           <WeeklyStrip
@@ -865,15 +734,15 @@ export function Dashboard({
                 value: formatHours(week.actualHours),
               },
               {
-                id: "goal",
+                id: "pace",
                 icon: CompassIcon,
-                label: "Goal",
-                value: formatHours(week.goalHours),
+                label: "Needed/day",
+                value: neededHoursPerDay,
               },
               {
                 id: "invoiced",
                 icon: InvoiceIcon,
-                label: "Invoiced",
+                label: "Earned",
                 value: formatCurrency(invoicedThisWeek),
               },
             ]}
@@ -909,56 +778,19 @@ export function Dashboard({
             goalProgress={goalProgress}
             hasBusinessHistory={hasBusinessHistory}
             monthReservedTax={month.reservedTaxFromPreviousMonths}
-            monthlyGap={
-              projectedTakeHome === undefined ? undefined : neededMonthlyAverage
-            }
+            now={now}
             projectedProfit={projectedProfit}
             projectedTakeHome={projectedTakeHome}
             statusLabel={status.label}
             statusKind={status.kind}
             supportSentence={heroSupportSentence}
             taxToSaveThisMonth={month.forecastCalculatedTaxToSaveThisMonth}
+            yearHours={year.ytdHours}
             yearlyNetGoal={yearlyNetGoal}
           />
 
-          <BottomNavigationDock onNavigate={onNavigate} />
-        </div>
-      </div>
-    </div>
+    </PhoneStage>
   );
-}
-
-function useDashboardStageScale() {
-  const [scale, setScale] = useState(1);
-
-  useEffect(() => {
-    const updateScale = () => {
-      const availableWidth = Math.max(
-        1,
-        window.innerWidth - STAGE_VIEWPORT_PADDING,
-      );
-      const availableHeight = Math.max(
-        1,
-        window.innerHeight - STAGE_VIEWPORT_PADDING,
-      );
-      const nextScale = Math.min(
-        1,
-        availableWidth / STAGE_WIDTH,
-        availableHeight / STAGE_HEIGHT,
-      );
-
-      setScale(Number(nextScale.toFixed(4)));
-    };
-
-    updateScale();
-    window.addEventListener("resize", updateScale);
-
-    return () => {
-      window.removeEventListener("resize", updateScale);
-    };
-  }, []);
-
-  return scale;
 }
 
 function WeeklyStrip({
@@ -1710,133 +1542,6 @@ function DashboardBannerAnimationStyles() {
         animation: dashboardAlertPulseIcon 10s ease-in-out infinite;
         transform-origin: center;
       }
-
-      .dashboard-gold-label {
-        background: linear-gradient(
-          180deg,
-          #fff3df 0%,
-          #e5c6a3 48%,
-          #b9845f 100%
-        );
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
-        -webkit-text-fill-color: transparent;
-        filter: drop-shadow(0 1px 1px rgba(18, 10, 5, 0.76))
-          drop-shadow(0 0 4px rgba(205, 142, 88, 0.16));
-      }
-
-      .dashboard-gold-soft {
-        background: linear-gradient(
-          180deg,
-          #f9dfbc 0%,
-          #c99770 58%,
-          #9e6848 100%
-        );
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
-        -webkit-text-fill-color: transparent;
-        filter: drop-shadow(0 1px 1px rgba(15, 8, 4, 0.78));
-      }
-
-      .dashboard-gold-title {
-        background: linear-gradient(
-          180deg,
-          #fff8ec 0%,
-          #ead0ad 48%,
-          #bd8a63 100%
-        );
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
-        -webkit-text-fill-color: transparent;
-        line-height: 1.08;
-        filter: drop-shadow(0 2px 2px rgba(17, 9, 4, 0.82))
-          drop-shadow(0 0 7px rgba(210, 152, 95, 0.2));
-      }
-
-      .dashboard-gold-value {
-        background: linear-gradient(
-          180deg,
-          #f7d7a8 0%,
-          #d69a61 42%,
-          #aa6f43 72%,
-          #7a4629 100%
-        );
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
-        -webkit-text-fill-color: transparent;
-        filter: drop-shadow(0 2px 2px rgba(18, 9, 4, 0.82))
-          drop-shadow(0 0 8px rgba(190, 126, 70, 0.24));
-      }
-
-      .dashboard-gold-hero-value {
-        background: linear-gradient(
-          180deg,
-          #fff1ca 0%,
-          #e9bf7f 30%,
-          #c3824a 64%,
-          #7f492a 100%
-        );
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
-        -webkit-text-fill-color: transparent;
-        letter-spacing: 0;
-        filter: drop-shadow(0 4px 4px rgba(18, 9, 4, 0.88))
-          drop-shadow(0 0 14px rgba(205, 139, 75, 0.3));
-      }
-
-      .dashboard-nav-active-text {
-        background: linear-gradient(
-          180deg,
-          #fff4df 0%,
-          #d4a77a 62%,
-          #704329 100%
-        );
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
-        -webkit-text-fill-color: transparent;
-        filter: drop-shadow(0 1px 1px rgba(255, 242, 207, 0.28));
-      }
-
-      .dashboard-status-good {
-        color: #aaf0be;
-        text-shadow:
-          0 1px 1px rgba(5, 18, 8, 0.72),
-          0 0 8px rgba(93, 231, 132, 0.24);
-      }
-
-      .dashboard-status-waiting {
-        color: #fff2a8;
-        text-shadow:
-          0 1px 1px rgba(32, 23, 4, 0.72),
-          0 0 8px rgba(255, 230, 91, 0.26);
-      }
-
-      .dashboard-status-set-goal {
-        color: #ff5b4f;
-        text-shadow:
-          0 1px 1px rgba(35, 3, 2, 0.72),
-          0 0 8px rgba(255, 50, 37, 0.3);
-      }
-
-      .dashboard-status-close {
-        color: #67f2dc;
-        text-shadow:
-          0 1px 1px rgba(3, 24, 22, 0.72),
-          0 0 8px rgba(68, 234, 211, 0.28);
-      }
-
-      .dashboard-status-behind {
-        color: #ffae4f;
-        text-shadow:
-          0 1px 1px rgba(35, 14, 2, 0.72),
-          0 0 8px rgba(255, 134, 37, 0.28);
-      }
     `}</style>
   );
 }
@@ -1846,30 +1551,35 @@ function YearlyPlanningCard({
   goalProgress,
   hasBusinessHistory,
   monthReservedTax,
-  monthlyGap,
+  now,
   projectedProfit,
   projectedTakeHome,
   statusLabel,
   statusKind,
   supportSentence,
   taxToSaveThisMonth,
+  yearHours,
   yearlyNetGoal,
 }: {
   beforeTaxTarget: number;
   goalProgress: number | undefined;
   hasBusinessHistory: boolean;
   monthReservedTax: number | undefined;
-  monthlyGap: number | undefined;
+  now: Date;
   projectedProfit: number | undefined;
   projectedTakeHome: number | undefined;
   statusLabel: string;
   statusKind: ProgressStatusKind;
   supportSentence: string;
   taxToSaveThisMonth: number | undefined;
+  yearHours: number;
   yearlyNetGoal: number;
 }) {
   const projectedTakeHomeText =
     projectedTakeHome === undefined ? "—" : formatCurrency(projectedTakeHome);
+  const shortMonth = now.toLocaleDateString("en-GB", { month: "short" });
+  const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const hoursToRule = Math.max(0, HOURS_RULE - yearHours);
 
   return (
     <section
@@ -2012,11 +1722,15 @@ function YearlyPlanningCard({
             }}
           >
             <DashboardMetricCard
-              icon={GapIcon}
-              label="Monthly gap"
-              value={
-                monthlyGap === undefined ? "—" : formatCurrency(monthlyGap)
+              caption={
+                hoursToRule > 0
+                  ? `${formatHours(hoursToRule)} to ${formatNumber(HOURS_RULE)}h`
+                  : `${formatNumber(HOURS_RULE)}h rule met`
               }
+              captionTone={hoursToRule > 0 ? "warn" : "good"}
+              icon={ClockIcon}
+              label="Hours this year"
+              value={formatHours(yearHours)}
             />
           </div>
         </div>
@@ -2059,7 +1773,7 @@ function YearlyPlanningCard({
                     <TaxSupportItem
                       icon={TaxReserveIcon}
                       id="taxReserved"
-                      label="Tax reserved before this month"
+                      label={`Tax saved by 1 ${shortMonth}`}
                       value={
                         monthReservedTax === undefined
                           ? "—"
@@ -2078,7 +1792,7 @@ function YearlyPlanningCard({
                     <TaxSupportItem
                       icon={CalendarSaveIcon}
                       id="taxToSave"
-                      label="Tax to save this month"
+                      label={`Tax to add by ${lastDayOfMonth} ${shortMonth} · so far`}
                       value={
                         taxToSaveThisMonth === undefined
                           ? "—"
@@ -2189,10 +1903,14 @@ function ProgressRow({
 }
 
 function DashboardMetricCard({
+  caption,
+  captionTone,
   icon,
   label,
   value,
 }: {
+  caption?: string;
+  captionTone?: "good" | "warn";
   icon: StaticImageData;
   label: string;
   value: string;
@@ -2209,6 +1927,17 @@ function DashboardMetricCard({
         <span className="dashboard-gold-value mt-2 block truncate text-[18px] font-semibold leading-none">
           {value}
         </span>
+        {caption ? (
+          <span
+            className={`mt-1.5 block truncate text-[10px] font-semibold leading-none ${
+              captionTone === "good"
+                ? "dashboard-status-good"
+                : "dashboard-status-behind"
+            }`}
+          >
+            {caption}
+          </span>
+        ) : null}
       </span>
     </div>
   );
@@ -2262,154 +1991,6 @@ function TaxSupportItem({
   );
 }
 
-function BottomNavigationDock({
-  onNavigate,
-}: {
-  onNavigate?: (screen: Screen) => void;
-}) {
-  return (
-    <nav
-      className="absolute"
-      style={{
-        left: DASHBOARD_POS.nav.side,
-        right: DASHBOARD_POS.nav.side,
-        bottom: DASHBOARD_POS.nav.bottom,
-        height: DASHBOARD_POS.nav.height,
-      }}
-    >
-      <div
-        className="grid h-full grid-cols-3"
-        style={{ gap: DASHBOARD_POS.nav.gap }}
-      >
-        <div
-          className="h-full"
-          style={{
-            transform: getOffsetTransform(
-              DASHBOARD_POS.nav.leftOffsetX,
-              DASHBOARD_POS.nav.leftOffsetY,
-            ),
-          }}
-        >
-          <BottomNavItem
-            highlight={LeftHighlightButton}
-            id="report"
-            icon={ReportIcon}
-            label="Report"
-            onClick={() => onNavigate?.("daily-log")}
-          />
-        </div>
-        <div
-          className="h-full"
-          style={{
-            transform: getOffsetTransform(
-              DASHBOARD_POS.nav.centerOffsetX,
-              DASHBOARD_POS.nav.centerOffsetY,
-            ),
-          }}
-        >
-          <BottomNavItem
-            active
-            highlight={CenterHighlightButton}
-            id="dashboard"
-            icon={OwlIcon}
-            label="Dashboard"
-            onClick={() => onNavigate?.("dashboard")}
-          />
-        </div>
-        <div
-          className="h-full"
-          style={{
-            transform: getOffsetTransform(
-              DASHBOARD_POS.nav.rightOffsetX,
-              DASHBOARD_POS.nav.rightOffsetY,
-            ),
-          }}
-        >
-          <BottomNavItem
-            highlight={RightHighlightButton}
-            id="configuration"
-            icon={ConfigurationIcon}
-            label="Configuration"
-            onClick={() => onNavigate?.("configuration")}
-          />
-        </div>
-      </div>
-    </nav>
-  );
-}
-
-function BottomNavItem({
-  active = false,
-  highlight,
-  id,
-  icon,
-  label,
-  onClick,
-}: {
-  active?: boolean;
-  highlight: StaticImageData;
-  id: NavItemId;
-  icon: StaticImageData;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      aria-current={active ? "page" : undefined}
-      className="dashboard-gold-label relative flex h-full min-w-0 flex-col items-center justify-center gap-1 overflow-visible px-1"
-      onClick={onClick}
-      type="button"
-    >
-      {active ? (
-        <span
-          className="pointer-events-none absolute inset-0"
-          style={{
-            borderRadius: DASHBOARD_POS.nav.selectedCoverRadius,
-            clipPath: `inset(0 round ${DASHBOARD_POS.nav.selectedCoverRadius}px)`,
-            overflow: "hidden",
-            transform: `translate(${DASHBOARD_POS.nav.selectedCoverOffsetX}px, ${DASHBOARD_POS.nav.selectedCoverOffsetY}px) scaleX(${DASHBOARD_POS.nav.selectedCoverScaleX}) scaleY(${DASHBOARD_POS.nav.selectedCoverScaleY})`,
-          }}
-        >
-          <Image
-            alt=""
-            className="rounded-[inherit] object-fill"
-            fill
-            priority
-            sizes="100px"
-            src={highlight}
-          />
-        </span>
-      ) : null}
-      <span
-        className="relative h-8 w-8"
-        style={{
-          transform: getOffsetScaleTransform(
-            getNavIconOffsetX(id),
-            getNavIconOffsetY(id),
-            getNavIconScale(id),
-          ),
-        }}
-      >
-        <Image alt="" className="object-contain" fill sizes="32px" src={icon} />
-      </span>
-      <span
-        className={`relative w-full overflow-visible whitespace-nowrap text-center text-[10px] font-semibold leading-[1.15] ${
-          active ? "dashboard-nav-active-text" : "dashboard-gold-label"
-        }`}
-        style={{
-          transform: getOffsetScaleTransform(
-            getNavLabelOffsetX(id),
-            getNavLabelOffsetY(id),
-            getNavLabelScale(id),
-          ),
-        }}
-      >
-        {label}
-      </span>
-    </button>
-  );
-}
-
 function getHeroSupportSentence({
   amountAhead,
   gapToGoal,
@@ -2440,6 +2021,20 @@ function getHeroSupportSentence({
   return `Ahead by ${formatCurrency(amountAhead ?? 0)}\nKeep the pace steady`;
 }
 
+// Weekdays left this week, counting today only if it hasn't been reported yet.
+function getRemainingWorkdaysThisWeek(entries: DailyEntry[], now: Date) {
+  const day = now.getDay();
+
+  if (day === 0 || day === 6) {
+    return 0;
+  }
+
+  const daysThroughFriday = 6 - day;
+  const isTodayReported = entries.some((entry) => entry.date === toDateKey(now));
+
+  return isTodayReported ? daysThroughFriday - 1 : daysThroughFriday;
+}
+
 function getCurrentWeekInvoicedIncome(entries: DailyEntry[], now: Date) {
   const weekStart = new Date(now);
   const day = weekStart.getDay();
@@ -2454,7 +2049,7 @@ function getCurrentWeekInvoicedIncome(entries: DailyEntry[], now: Date) {
     const entryDate = new Date(`${entry.date}T00:00:00`);
 
     if (entryDate >= weekStart && entryDate < weekEnd) {
-      return total + entry.invoicedIncome;
+      return total + getEntryInvoicedIncome(entry);
     }
 
     return total;

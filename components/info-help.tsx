@@ -44,7 +44,7 @@ export function InfoHelp({ body, title }: InfoHelpProps) {
     <>
       <button
         aria-label={`More info about ${title}`}
-        className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-border bg-background text-[11px] font-semibold text-muted-foreground transition hover:border-foreground/30 hover:text-foreground"
+        className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border border-[#9d7248]/60 bg-[#17110d] text-[10px] font-semibold text-[#f2d6ab] transition hover:bg-[#231914] hover:text-[#fff3df]"
         onClick={() => setIsOpen((currentValue) => !currentValue)}
         type="button"
       >
@@ -55,21 +55,21 @@ export function InfoHelp({ body, title }: InfoHelpProps) {
         ? createPortal(
             <div
               aria-modal="true"
-              className="fixed inset-0 z-[2147483647] flex items-start justify-center bg-foreground/35 px-4 pb-6 pt-[max(1rem,env(safe-area-inset-top))]"
+              className="fixed inset-0 z-[2147483647] flex items-end justify-center bg-black/65 px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-6 backdrop-blur-[2px] sm:items-center"
               role="dialog"
               onClick={() => setIsOpen(false)}
             >
               <div
-                className="mt-2 w-full max-w-sm rounded-[1.6rem] border border-border bg-card p-5 shadow-[0_24px_48px_rgba(24,32,48,0.28)]"
+                className="w-full max-w-sm rounded-[22px] border border-[#a8744a]/55 bg-[linear-gradient(180deg,#261c15_0%,#140f0b_100%)] p-5 shadow-[0_24px_48px_rgba(0,0,0,0.6)]"
                 onClick={(event) => event.stopPropagation()}
               >
                 <div className="flex items-start justify-between gap-4">
-                  <h3 id={titleId} className="text-base font-semibold text-foreground">
+                  <h3 id={titleId} className="dashboard-gold-title text-[17px] font-semibold">
                     {title}
                   </h3>
                   <button
                     aria-label="Close help"
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground transition hover:bg-muted"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full text-[#b0947a] transition hover:bg-[#2a1f17] hover:text-[#f3e4cf]"
                     onClick={() => setIsOpen(false)}
                     type="button"
                   >
@@ -78,7 +78,7 @@ export function InfoHelp({ body, title }: InfoHelpProps) {
                     </span>
                   </button>
                 </div>
-                <div className="mt-3 text-sm leading-6 text-muted-foreground">
+                <div className="mt-3 space-y-2 text-sm leading-6 text-[#d9c3a6]">
                   {typeof body === 'string' ? (
                     <p className="whitespace-pre-line">{body}</p>
                   ) : (
