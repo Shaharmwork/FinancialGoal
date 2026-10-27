@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { scrollWithinStage } from '@/components/phone-stage'
 import { WarningModal } from '@/components/warning-modal'
 import {
   areWorkItemDraftsEqual,
@@ -566,13 +567,10 @@ export function DailyLog({
       ) ??
       todayDateKey
     syncSelectedDate(targetDateKey, true)
-    formRef.current?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
-    })
+    scrollWithinStage(formRef.current)
 
     const focusTimeoutId = window.setTimeout(() => {
-      hoursInputRef.current?.focus()
+      hoursInputRef.current?.focus({ preventScroll: true })
     }, 180)
 
     return () => {
@@ -602,7 +600,8 @@ export function DailyLog({
       return
     }
 
-    input.focus()
+    input.focus({ preventScroll: true })
+    scrollWithinStage(input, 'center')
     pendingProjectRowFocusLineIndexRef.current = null
   }, [currentWorkItems])
 
@@ -620,7 +619,8 @@ export function DailyLog({
         ? statusActionButtonRef.current
         : hoursInputRef.current
 
-    focusTarget?.focus()
+    focusTarget?.focus({ preventScroll: true })
+    scrollWithinStage(focusTarget ?? null, 'center')
     pendingEntryEditFocusDateKeyRef.current = null
   }, [
     date,
@@ -1156,10 +1156,7 @@ export function DailyLog({
     pendingEntryEditFocusDateKeyRef.current = entry.date
     syncSelectedDate(entry.date, true)
     setEntryEditFocusRequest((currentValue) => currentValue + 1)
-    formRef.current?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
-    })
+    scrollWithinStage(formRef.current)
   }
 
   const handleConfirmDeleteEntry = async () => {
@@ -1271,7 +1268,7 @@ export function DailyLog({
 
     syncSelectedDate(firstMissingDateKey, true)
     window.setTimeout(() => {
-      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      scrollWithinStage(formRef.current)
       hoursInputRef.current?.focus({ preventScroll: true })
     }, 60)
   }
@@ -1280,7 +1277,7 @@ export function DailyLog({
   const showReportsForMonth = (delta: number) => {
     handleMonthChange(delta)
     window.setTimeout(() => {
-      reportListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      scrollWithinStage(reportListRef.current)
     }, 60)
   }
   const selectedDateLabel = parseDateKey(date).toLocaleDateString('en-GB', {

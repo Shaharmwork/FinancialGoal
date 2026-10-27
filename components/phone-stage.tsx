@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import Image, { type StaticImageData } from "next/image";
-import CleanDash from "@/src/assets/web/backgrounds/CleanDash.jpg";
+import CleanDash from "@/src/assets/web/backgrounds/CleanDash.webp";
 import CardStrip from "@/src/assets/backgrounds/stage/card-strip.png";
 import CardTopLeft from "@/src/assets/backgrounds/stage/card-top-left.png";
 import CardTopMiddle from "@/src/assets/backgrounds/stage/card-top-middle.png";
@@ -135,6 +135,30 @@ function isTextField(target: EventTarget | null): target is HTMLInputElement | H
   );
 }
 
+// Scroll only the content pane: scrollIntoView can also scroll clipped ancestors,
+// moving the stage and dock. DOM rectangles include the stage's responsive scale.
+export function scrollWithinStage(
+  target: HTMLElement | null,
+  block: "start" | "center" = "start",
+) {
+  const scroller = target?.closest<HTMLElement>("[data-stage-scroll]");
+  if (!target || !scroller || !scroller.offsetHeight) return;
+
+  const pane = scroller.getBoundingClientRect();
+  const rect = target.getBoundingClientRect();
+  const scale = pane.height / scroller.offsetHeight;
+  if (!scale) return;
+
+  const inset = block === "center"
+    ? (scroller.clientHeight - rect.height / scale) / 2
+    : parseFloat(getComputedStyle(scroller).paddingTop) || 0;
+
+  scroller.scrollTo({
+    top: scroller.scrollTop + (rect.top - pane.top) / scale - scroller.clientTop - inset,
+    behavior: "smooth",
+  });
+}
+
 // While typing on a phone: keep the field visible above the keyboard, and report
 // it so the dock can step aside and leave the room for the form.
 function useTypingInStage(enabled: boolean) {
@@ -146,6 +170,8 @@ function useTypingInStage(enabled: boolean) {
       return;
     }
 
+    let focusTimer: number | undefined;
+
     const handleFocusIn = (event: FocusEvent) => {
       const target = event.target;
 
@@ -154,13 +180,15 @@ function useTypingInStage(enabled: boolean) {
       }
 
       setIsTyping(true);
-      window.setTimeout(() => {
-        target.scrollIntoView({ behavior: "smooth", block: "center" });
+      window.clearTimeout(focusTimer);
+      focusTimer = window.setTimeout(() => {
+        if (document.activeElement === target) scrollWithinStage(target, "center");
       }, 300);
     };
 
     const handleFocusOut = (event: FocusEvent) => {
       if (isTextField(event.target) && !isTextField(event.relatedTarget)) {
+        window.clearTimeout(focusTimer);
         setIsTyping(false);
       }
     };
@@ -168,6 +196,7 @@ function useTypingInStage(enabled: boolean) {
     document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("focusout", handleFocusOut);
     return () => {
+      window.clearTimeout(focusTimer);
       document.removeEventListener("focusin", handleFocusIn);
       document.removeEventListener("focusout", handleFocusOut);
     };
@@ -192,14 +221,26 @@ export function PhoneStage({
   const layout = useStageLayout();
   const isPhone = layout.mode === "phone";
   const isTyping = useTypingInStage(isPhone && variant === "screen");
-  // On a phone, scrolling screens fill the screen height; the dashboard artwork keeps
-  // its fixed height and the page scrolls if the screen is shorter than that.
-  const stageHeight =
-    isPhone && variant === "screen" ? layout.viewportHeight / layout.scale : STAGE_HEIGHT;
+  // Every phone screen fills the viewport; only its content scrolls above the dock.
+  const stageHeight = isPhone ? layout.viewportHeight / layout.scale : STAGE_HEIGHT;
+  const artworkContent = (
+    <>
+      <Image
+        alt=""
+        className="pointer-events-none object-fill"
+        fill
+        priority
+        sizes="390px"
+        src={CleanDash}
+      />
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,219,172,0.05),transparent_34%),linear-gradient(180deg,rgba(0,0,0,0.03),rgba(0,0,0,0.12))]" />
+      {children}
+    </>
+  );
 
   const stage = (
         <div
-          className={`overflow-hidden bg-[#050505] ${
+          className={`overflow-clip bg-black ${
             isPhone
               ? "absolute left-0 top-0"
               : "absolute left-1/2 top-1/2 rounded-[2rem] shadow-[0_28px_80px_rgba(0,0,0,0.72)]"
@@ -216,21 +257,27 @@ export function PhoneStage({
           }}
         >
           {variant === "artwork" ? (
-            <>
-              <Image
-                alt=""
-                className="pointer-events-none object-fill"
-                fill
-                priority
-                sizes="390px"
-                src={CleanDash}
-              />
-              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,219,172,0.05),transparent_34%),linear-gradient(180deg,rgba(0,0,0,0.03),rgba(0,0,0,0.12))]" />
-              {children}
-            </>
+            isPhone ? (
+              <>
+                <CardBackground />
+                <div
+                  className="absolute inset-x-0 top-0 overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                  data-stage-scroll
+                  style={{ bottom: DOCK_HEIGHT }}
+                >
+                  {/* Keep the artwork geometry, but remove its embedded dock from the scroll area. */}
+                  <div className="relative overflow-hidden" style={{ height: STAGE_HEIGHT - DOCK_HEIGHT }}>
+                    <div className="relative bg-black" style={{ height: STAGE_HEIGHT }}>
+                      {artworkContent}
+                    </div>
+                  </div>
+                </div>
+                <DockFrame />
+              </>
+            ) : artworkContent
           ) : (
             <>
-              <CardBackground />
+              <CardBackground bottom={isTyping ? 0 : DOCK_HEIGHT} />
               <div
                 className="absolute inset-x-0 top-0 overflow-y-auto overscroll-contain px-4 pb-24 pt-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
                 data-stage-scroll
@@ -247,7 +294,7 @@ export function PhoneStage({
 
   if (isPhone) {
     return (
-      <div className="fixed inset-0 z-[180] overflow-x-hidden overflow-y-auto overscroll-none bg-black text-[#f7ebda]">
+      <div className="fixed inset-0 z-[180] overflow-clip bg-black text-[#f7ebda]">
         <div
           className="relative mx-auto"
           style={{
@@ -262,8 +309,8 @@ export function PhoneStage({
   }
 
   return (
-    <div className="fixed inset-0 z-[180] overflow-hidden bg-black text-[#f7ebda]">
-      <div className="relative h-[100dvh] w-full overflow-hidden bg-black">{stage}</div>
+    <div className="fixed inset-0 z-[180] overflow-clip bg-black text-[#f7ebda]">
+      <div className="relative h-[100dvh] w-full overflow-clip bg-black">{stage}</div>
     </div>
   );
 }
@@ -275,9 +322,9 @@ const CARD_TOP_HEIGHT = 12;
 const CARD_CORNER_WIDTH = 45;
 const CARD_STRIP_HEIGHT = 34;
 
-function CardBackground() {
+function CardBackground({ bottom = DOCK_HEIGHT }: { bottom?: number }) {
   return (
-    <div aria-hidden="true" className="pointer-events-none absolute inset-0">
+    <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0" style={{ bottom }}>
       <div
         className="absolute inset-x-0 bottom-0"
         style={{
@@ -354,7 +401,7 @@ export function BottomNavigationDock({
             borderRadius: NAV_POS.selectedCoverRadius,
             height: cover.height,
             left: cover.left,
-            top: cover.top,
+            bottom: STAGE_HEIGHT - cover.top - cover.height,
             width: cover.width,
           }}
         >
