@@ -1,6 +1,7 @@
 'use client'
 
 import { normalizeEntry, normalizeMonthlySummary, normalizeSettings } from './default-state'
+import type { ReportDeletion, ReportOverlay } from './sync'
 import type { DailyEntry, MonthlySummary, Screen, Settings } from './types'
 
 interface ConfigurationDraft {
@@ -29,7 +30,10 @@ interface UserUiPreferences {
   configurationDraft?: ConfigurationDraft
   currentScreen?: Screen
   dailyLogSelectedDate?: string
+  // Legacy: a full copy of all days. No longer read, because a stale full copy
+  // would look like deletions of days added on another device.
   reportDraftEntries?: DailyEntry[]
+  reportOverlay?: { entries?: unknown; deletions?: unknown }
   reportDayFormDrafts?: Record<string, Partial<ReportDayFormDraft>>
 }
 
@@ -148,35 +152,55 @@ export function updateUserDailyLogSelectedDate(userId: string, selectedDate: str
   })
 }
 
-export function getUserReportDraftEntries(userId: string): DailyEntry[] | null {
-  const userPreferences = readStoredPreferences()[userId]
-  const reportDraftEntries = userPreferences?.reportDraftEntries
+// Unsaved report changes: only the days the user edited, plus explicit deletions.
+export function getUserReportOverlay(userId: string): ReportOverlay | null {
+  const storedOverlay = readStoredPreferences()[userId]?.reportOverlay
 
-  if (!Array.isArray(reportDraftEntries)) {
+  if (typeof storedOverlay !== 'object' || storedOverlay === null) {
     return null
   }
 
-  const normalizedEntries = reportDraftEntries
-    .map((entry) => normalizeEntry(entry))
-    .filter((entry): entry is DailyEntry => entry !== null)
+  const entries = Array.isArray(storedOverlay.entries)
+    ? storedOverlay.entries
+        .map((entry) => normalizeEntry(entry))
+        .filter((entry): entry is DailyEntry => entry !== null)
+    : []
+  const deletions: Record<string, ReportDeletion> = {}
 
-  return normalizedEntries
+  if (typeof storedOverlay.deletions === 'object' && storedOverlay.deletions !== null) {
+    Object.entries(storedOverlay.deletions as Record<string, unknown>).forEach(([date, value]) => {
+      const deletion = value as Partial<ReportDeletion> | null
+
+      if (typeof deletion?.id === 'string' && typeof deletion.updatedAt === 'string') {
+        deletions[date] = { id: deletion.id, updatedAt: deletion.updatedAt }
+      }
+    })
+  }
+
+  return {
+    entries: Object.fromEntries(entries.map((entry) => [entry.date, entry])),
+    deletions,
+  }
 }
 
-export function updateUserReportDraftEntries(userId: string, reportDraftEntries: DailyEntry[]) {
+export function updateUserReportOverlay(userId: string, overlay: ReportOverlay) {
   const storedPreferences = readStoredPreferences()
-  const currentPreferences = storedPreferences[userId] ?? {}
+  const { reportDraftEntries: _legacyDraft, ...currentPreferences } =
+    storedPreferences[userId] ?? {}
 
   writeStoredPreferences({
     ...storedPreferences,
     [userId]: {
       ...currentPreferences,
-      reportDraftEntries,
+      reportOverlay: {
+        entries: Object.values(overlay.entries),
+        deletions: overlay.deletions,
+      },
     },
   })
 }
 
-export function clearUserReportDraftEntries(userId: string) {
+export function clearUserReportOverlay(userId: string) {
   const storedPreferences = readStoredPreferences()
   const currentPreferences = storedPreferences[userId]
 
@@ -184,7 +208,8 @@ export function clearUserReportDraftEntries(userId: string) {
     return
   }
 
-  const { reportDraftEntries, ...remainingPreferences } = currentPreferences
+  const { reportDraftEntries: _legacyDraft, reportOverlay: _overlay, ...remainingPreferences } =
+    currentPreferences
 
   writeStoredPreferences({
     ...storedPreferences,

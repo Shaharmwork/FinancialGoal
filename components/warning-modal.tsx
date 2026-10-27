@@ -3,7 +3,15 @@
 import { useEffect, useId, useState } from 'react'
 import { createPortal } from 'react-dom'
 
+interface WarningModalAction {
+  label: string
+  onClick: () => void
+  tone?: 'danger' | 'neutral'
+}
+
 interface WarningModalProps {
+  // Extra choices shown before the secondary action, e.g. a destructive option.
+  extraActions?: WarningModalAction[]
   body: string
   isOpen: boolean
   onClose: () => void
@@ -15,6 +23,7 @@ interface WarningModalProps {
 }
 
 export function WarningModal({
+  extraActions = [],
   body,
   isOpen,
   onClose,
@@ -92,7 +101,21 @@ export function WarningModal({
 
         <p className="mt-3 whitespace-pre-line text-sm leading-6 text-[#d9c3a6]">{body}</p>
 
-        <div className="mt-5 flex justify-end gap-2">
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          {extraActions.map((action) => (
+            <button
+              key={action.label}
+              className={
+                action.tone === 'danger'
+                  ? 'rounded-[13px] border border-[#ff6b5b]/60 bg-[#2a0f0c] px-4 py-2.5 text-sm font-semibold text-[#ffd9d2] transition hover:bg-[#3a1410]'
+                  : 'rounded-[13px] border border-[#a97849]/60 bg-[#1a1410] px-4 py-2.5 text-sm font-semibold text-[#e8cfae] transition hover:bg-[#241a14]'
+              }
+              onClick={action.onClick}
+              type="button"
+            >
+              {action.label}
+            </button>
+          ))}
           {secondaryActionLabel ? (
             <button
               className="rounded-[13px] border border-[#a97849]/60 bg-[#1a1410] px-4 py-2.5 text-sm font-semibold text-[#e8cfae] transition hover:bg-[#241a14]"

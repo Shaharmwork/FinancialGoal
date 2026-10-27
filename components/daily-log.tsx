@@ -3,6 +3,20 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { WarningModal } from '@/components/warning-modal'
 import {
+  areWorkItemDraftsEqual,
+  getConfiguredHourlyRate,
+  getDailyDraftSaveState,
+  getEntryDraft,
+  getWorkItemsDraftTotals,
+  hasWorkItemDraftRows,
+  isDraftEmpty,
+  parseNumber,
+  sortWorkItemDrafts,
+  type DayInputDraft,
+  type InvalidDailyFieldsState,
+  type WorkItemDraft,
+} from '@/lib/report-drafts'
+import {
   clearUserReportDayFormDrafts,
   getUserDailyLogSelectedDate,
   getUserReportDayFormDrafts,
@@ -55,12 +69,15 @@ interface DailyLogProps {
   fillMissingDaysRequest?: number
   hasUnsavedChanges?: boolean
   monthlySummaries: MonthlySummary[]
-  onDeleteSavedEntryImmediately: (dateKey: string) => void
+  // Resolves true once Supabase confirmed the delete.
+  onDeleteSavedEntryImmediately: (dateKey: string) => Promise<boolean>
   onBackfillMissingMonth?: (monthKey: string) => void
   onDiscardEntries?: () => void
   onRemoveEntryForDate: (dateKey: string) => void
   onRegisterNavigationHandlers?: (handlers: DailyLogNavigationHandlers | null) => void
-  onSaveEntries: (nextEntries?: DailyEntry[]) => boolean | void
+  // Resolves true once Supabase confirmed every change.
+  onSaveEntries: (nextEntries?: DailyEntry[]) => Promise<boolean>
+  isSaving?: boolean
   onUnsavedDayInputDraftsChange?: (hasUnsavedDrafts: boolean) => void
   onUpsertEntry: (entry: DailyEntry) => void
   reportResetRequest?: number
@@ -71,7 +88,10 @@ interface DailyLogProps {
 
 export interface DailyLogNavigationHandlers {
   discard: () => void
-  save: () => boolean | void
+  // Clears this screen's field drafts after the page confirmed they were saved.
+  markSaved: () => void
+  discardDraftForDate: (dateKey: string) => void
+  save: () => Promise<boolean>
 }
 
 interface CalendarDay {
@@ -79,12 +99,6 @@ interface CalendarDay {
   isCurrentMonth: boolean
   isWeekend: boolean
   key: string
-}
-
-type InvalidDailyFieldsState = {
-  hours?: boolean
-  income?: boolean
-  workItems?: boolean
 }
 
 interface DailySoftWarning {
@@ -98,46 +112,9 @@ interface DailyValidationIssue {
 }
 
 type DayStatusOption = 'worked' | 'no_work' | 'vacation'
-type WorkItemDraft = ReportWorkItemDraft
-type DayInputDraft = ReportDayFormDraft
 type DayInputTextField = Exclude<keyof DayInputDraft, 'workItems'>
 
 type InvalidDailyFieldsByDate = Record<string, InvalidDailyFieldsState>
-type DailyDraftSaveState =
-  | {
-      kind: 'expense_only'
-      values: {
-        expenses: number
-        hours: number
-        invoicedIncome: number
-        workItems?: WorkItem[]
-      }
-    }
-  | {
-      invalidFields: InvalidDailyFieldsState
-      kind: 'invalid'
-      values: {
-        expenses: number
-        hours: number
-        invoicedIncome: number
-        workItems?: WorkItem[]
-      }
-    }
-  | {
-      kind: 'worked'
-      values: {
-        expenses: number
-        hours: number
-        invoicedIncome: number
-        workItems?: WorkItem[]
-      }
-    }
-
-function parseNumber(value: string) {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : 0
-}
-
 function isWeekend(date: Date) {
   const day = date.getDay()
   return day === 0 || day === 6
@@ -204,117 +181,8 @@ function getCompactDayLabel(date: Date) {
   })
 }
 
-function getConfiguredHourlyRate(settings: Settings) {
-  const defaultShiftHours = settings.defaultShiftHours ?? 0
-  const defaultShiftIncome = settings.defaultShiftIncome ?? 0
-
-  return defaultShiftHours > 0 && defaultShiftIncome > 0
-    ? defaultShiftIncome / defaultShiftHours
-    : 0
-}
-
-function roundCents(value: number) {
-  return Math.round(value * 100) / 100
-}
-
-function sortWorkItemDrafts(workItems: WorkItemDraft[]) {
-  return [...workItems].sort((left, right) => left.lineIndex - right.lineIndex)
-}
-
 function sortNewestLineIndexFirst<T extends { lineIndex: number }>(items: T[]) {
   return [...items].sort((left, right) => right.lineIndex - left.lineIndex)
-}
-
-function getEntryWorkItemDrafts(entry: DailyEntry | undefined): WorkItemDraft[] | undefined {
-  if (
-    !entry ||
-    entry.dayStatus === 'no_work' ||
-    entry.dayStatus === 'vacation' ||
-    !entry.workItems ||
-    entry.workItems.length === 0
-  ) {
-    return undefined
-  }
-
-  return sortWorkItemDrafts(
-    entry.workItems.map((workItem, index) => ({
-      id: workItem.id,
-      projectName: workItem.projectName,
-      hours: workItem.hours > 0 ? workItem.hours.toString() : '',
-      hourlyRate:
-        typeof workItem.hourlyRate === 'number' && workItem.hourlyRate > 0
-          ? workItem.hourlyRate.toString()
-          : '',
-      invoicedIncome: workItem.invoicedIncome > 0 ? workItem.invoicedIncome.toString() : '',
-      lineIndex: workItem.lineIndex ?? index,
-    })),
-  )
-}
-
-function isWorkItemDraftBlank(workItem: WorkItemDraft) {
-  return (
-    workItem.projectName.trim() === '' &&
-    workItem.hours.trim() === '' &&
-    workItem.hourlyRate.trim() === '' &&
-    workItem.invoicedIncome.trim() === ''
-  )
-}
-
-function hasWorkItemDraftRows(draft: DayInputDraft) {
-  return Array.isArray(draft.workItems) && draft.workItems.length > 0
-}
-
-function getResolvedWorkItemInvoiceAmount(workItem: WorkItemDraft) {
-  if (workItem.invoicedIncome.trim() !== '') {
-    return parseNumber(workItem.invoicedIncome)
-  }
-
-  const resolvedHours = parseNumber(workItem.hours)
-  const resolvedHourlyRate = parseNumber(workItem.hourlyRate)
-
-  if (resolvedHours > 0 && resolvedHourlyRate > 0) {
-    return resolvedHours * resolvedHourlyRate
-  }
-
-  return 0
-}
-
-function getWorkItemsDraftTotals(workItems: WorkItemDraft[]) {
-  return workItems.reduce(
-    (totals, workItem) => {
-      if (isWorkItemDraftBlank(workItem)) {
-        return totals
-      }
-
-      return {
-        hours: totals.hours + parseNumber(workItem.hours),
-        invoicedIncome: totals.invoicedIncome + getResolvedWorkItemInvoiceAmount(workItem),
-      }
-    },
-    { hours: 0, invoicedIncome: 0 },
-  )
-}
-
-function areWorkItemDraftsEqual(left?: WorkItemDraft[], right?: WorkItemDraft[]) {
-  const sortedLeft = sortWorkItemDrafts(left ?? [])
-  const sortedRight = sortWorkItemDrafts(right ?? [])
-
-  if (sortedLeft.length !== sortedRight.length) {
-    return false
-  }
-
-  return sortedLeft.every((leftItem, index) => {
-    const rightItem = sortedRight[index]
-
-    return (
-      leftItem.id === rightItem.id &&
-      leftItem.projectName === rightItem.projectName &&
-      leftItem.hours === rightItem.hours &&
-      leftItem.hourlyRate === rightItem.hourlyRate &&
-      leftItem.invoicedIncome === rightItem.invoicedIncome &&
-      leftItem.lineIndex === rightItem.lineIndex
-    )
-  })
 }
 
 function shiftDateKey(dateKey: string, deltaDays: number) {
@@ -331,72 +199,6 @@ function shiftMonth(monthKey: string, delta: number) {
 
 function getDefaultDateForMonth(monthKey: string, today: Date) {
   return monthKey === toMonthKey(today) ? toDateKey(today) : toDateKey(parseMonthKey(monthKey))
-}
-
-function getEntryDraft(entry: DailyEntry | undefined): DayInputDraft {
-  if (!entry) {
-    return {
-      expenses: '',
-      hours: '',
-      hourlyRate: '',
-      totalIncome: '',
-    }
-  }
-
-  if (entry.dayStatus === 'no_work' || entry.dayStatus === 'vacation') {
-    return {
-      expenses: entry.expenses > 0 ? entry.expenses.toString() : '',
-      hours: '',
-      hourlyRate: '',
-      totalIncome: '',
-    }
-  }
-
-  const workItems = getEntryWorkItemDrafts(entry)
-  const entryHours = getEntryHours(entry)
-  const entryIncome = getEntryInvoicedIncome(entry)
-  // Saved days only store the total, so show it back as an hourly rate when
-  // hours x rate reproduces it to the cent, otherwise as a total override.
-  const derivedHourlyRate = entryHours > 0 ? roundCents(entryIncome / entryHours) : 0
-  const canShowAsHourlyRate =
-    derivedHourlyRate > 0 && roundCents(derivedHourlyRate * entryHours) === roundCents(entryIncome)
-
-  return {
-    expenses: entry.expenses > 0 ? entry.expenses.toString() : '',
-    hours: entryHours > 0 ? entryHours.toString() : '',
-    hourlyRate: canShowAsHourlyRate ? derivedHourlyRate.toString() : '',
-    totalIncome: !canShowAsHourlyRate && entryIncome > 0 ? entryIncome.toString() : '',
-    ...(workItems && workItems.length > 0 ? { workItems } : {}),
-  }
-}
-
-function isDraftEmpty(draft: DayInputDraft) {
-  if (hasWorkItemDraftRows(draft)) {
-    return false
-  }
-
-  return (
-    draft.hours.trim() === '' &&
-    draft.hourlyRate.trim() === '' &&
-    draft.totalIncome.trim() === '' &&
-    draft.expenses.trim() === ''
-  )
-}
-
-function getResolvedDraftIncome(draft: DayInputDraft, settings: Settings) {
-  if (draft.totalIncome.trim() !== '') {
-    return parseNumber(draft.totalIncome)
-  }
-
-  const resolvedHours = parseNumber(draft.hours)
-  const resolvedHourlyRate =
-    draft.hourlyRate.trim() !== '' ? parseNumber(draft.hourlyRate) : getConfiguredHourlyRate(settings)
-
-  if (resolvedHours > 0 && resolvedHourlyRate > 0) {
-    return resolvedHours * resolvedHourlyRate
-  }
-
-  return 0
 }
 
 function persistDayInputDrafts(userId: string, drafts: Record<string, DayInputDraft>) {
@@ -487,124 +289,12 @@ function getFirstMissingWeekdayInWeekForReport(
   return undefined
 }
 
-function getDailyDraftSaveState(draft: DayInputDraft, settings: Settings): DailyDraftSaveState {
-  const baseValues = {
-    expenses: parseNumber(draft.expenses),
-  }
-
-  if (hasWorkItemDraftRows(draft)) {
-    const resolvedWorkItems: WorkItem[] = []
-    let hasInvalidWorkItem = false
-
-    sortWorkItemDrafts(draft.workItems ?? []).forEach((workItem, index) => {
-      if (isWorkItemDraftBlank(workItem)) {
-        return
-      }
-
-      const resolvedHours = parseNumber(workItem.hours)
-      const resolvedHourlyRate = parseNumber(workItem.hourlyRate)
-      const resolvedInvoicedIncome = getResolvedWorkItemInvoiceAmount(workItem)
-
-      if (resolvedHours <= 0 || resolvedInvoicedIncome <= 0) {
-        hasInvalidWorkItem = true
-        return
-      }
-
-      resolvedWorkItems.push({
-        id: workItem.id,
-        projectName: workItem.projectName.trim(),
-        hours: Number(resolvedHours.toFixed(2)),
-        hourlyRate: resolvedHourlyRate > 0 ? Number(resolvedHourlyRate.toFixed(2)) : null,
-        invoicedIncome: Number(resolvedInvoicedIncome.toFixed(2)),
-        lineIndex: workItem.lineIndex ?? index,
-      })
-    })
-
-    const workItemTotals = resolvedWorkItems.reduce(
-      (totals, workItem) => ({
-        hours: totals.hours + workItem.hours,
-        invoicedIncome: totals.invoicedIncome + workItem.invoicedIncome,
-      }),
-      { hours: 0, invoicedIncome: 0 },
-    )
-
-    const values = {
-      ...baseValues,
-      hours: Number(workItemTotals.hours.toFixed(2)),
-      invoicedIncome: Number(workItemTotals.invoicedIncome.toFixed(2)),
-      workItems: resolvedWorkItems,
-    }
-
-    if (hasInvalidWorkItem || resolvedWorkItems.length === 0) {
-      return {
-        kind: 'invalid',
-        invalidFields: {
-          workItems: true,
-        },
-        values,
-      }
-    }
-
-    return {
-      kind: 'worked',
-      values,
-    }
-  }
-
-  const values = {
-    ...baseValues,
-    hours: parseNumber(draft.hours),
-    invoicedIncome: getResolvedDraftIncome(draft, settings),
-  }
-  const hasIncomeInput =
-    values.invoicedIncome > 0 ||
-    parseNumber(draft.hourlyRate) > 0 ||
-    parseNumber(draft.totalIncome) > 0
-
-  const hasAnyValue = values.hours > 0 || hasIncomeInput || values.expenses > 0
-
-  if (!hasAnyValue) {
-    return {
-      kind: 'invalid',
-      invalidFields: {
-        hours: true,
-        income: true,
-      },
-      values,
-    }
-  }
-
-  const isExpenseOnlyDay = values.expenses > 0 && values.hours <= 0 && !hasIncomeInput
-
-  if (isExpenseOnlyDay) {
-    return {
-      kind: 'expense_only',
-      values,
-    }
-  }
-
-  if (values.hours > 0 && values.invoicedIncome > 0) {
-    return {
-      kind: 'worked',
-      values,
-    }
-  }
-
-  return {
-    kind: 'invalid',
-    invalidFields: {
-      hours: values.hours <= 0,
-      income: values.invoicedIncome <= 0,
-    },
-    values,
-  }
-}
-
 export function DailyLog({
   entries,
   fillMissingDayTargetDateKey,
   fillMissingDaysRequest = 0,
   hasUnsavedChanges = false,
+  isSaving = false,
   monthlySummaries,
   onBackfillMissingMonth,
   onDeleteSavedEntryImmediately,
@@ -1123,8 +813,13 @@ export function DailyLog({
     }
   }
 
-  const handleSaveAllEntries = (event?: FormEvent<HTMLFormElement>) => {
+  const handleSaveAllEntries = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault()
+
+    if (isSaving) {
+      return false
+    }
+
     let nextEntriesToSave = entries
     const nextInvalidFieldsByDate: InvalidDailyFieldsByDate = {}
     const softWarnings: DailySoftWarning[] = []
@@ -1161,6 +856,7 @@ export function DailyLog({
           hours: 0,
           invoicedIncome: 0,
           expenses: Number(resolvedExpenses.toFixed(2)),
+          updatedAt: existingEntry.updatedAt,
         }
 
         nextEntriesToSave = [
@@ -1179,8 +875,10 @@ export function DailyLog({
 
       const {
         expenses: resolvedExpenses,
+        hourlyRate: resolvedHourlyRate,
         hours: resolvedHours,
         invoicedIncome: resolvedInvoicedIncome,
+        pricingMode: resolvedPricingMode,
         workItems: resolvedWorkItems,
       } = draftSaveState.values
 
@@ -1213,6 +911,11 @@ export function DailyLog({
           ? 0
           : Number(resolvedInvoicedIncome.toFixed(2)),
         expenses: Number(resolvedExpenses.toFixed(2)),
+        hourlyRate: shouldKeepExpenseEditableStatus ? null : (resolvedHourlyRate ?? null),
+        pricingMode: shouldKeepExpenseEditableStatus ? null : (resolvedPricingMode ?? null),
+        // The version this edit is based on; the database rejects it if the day
+        // changed elsewhere in the meantime.
+        updatedAt: existingEntry?.updatedAt,
         ...(!shouldKeepExpenseEditableStatus && resolvedWorkItems && resolvedWorkItems.length > 0
           ? {
               workItems: resolvedWorkItems.map((workItem, index) => ({
@@ -1241,32 +944,47 @@ export function DailyLog({
 
     setInvalidFieldsByDate({})
 
-    const didSaveContinue = onSaveEntries(nextEntriesToSave)
+    // The page saves and, only after Supabase confirms, clears the drafts (markSaved)
+    // and shows the confirmation. On failure every draft stays for a retry.
+    const wasSaved = await onSaveEntries(nextEntriesToSave)
 
-    if (didSaveContinue !== false) {
-      setDayInputDrafts({})
-      dayInputDraftsRef.current = {}
-      onUnsavedDayInputDraftsChange?.(false)
-      if (softWarnings.length > 0) {
-        const warningDates = softWarnings.map((warning) => warning.body)
-        const combinedBody =
-          warningDates.length === 1
-            ? `${warningDates[0]} was saved with expenses only. Add hours or income later if this should count as a worked day.`
-            : `These dates were saved with expenses only:\n\n${warningDates.join('\n')}\n\nAdd hours or income later if any of them should count as worked days.`
+    if (wasSaved && softWarnings.length > 0) {
+      const warningDates = softWarnings.map((warning) => warning.body)
+      const combinedBody =
+        warningDates.length === 1
+          ? `${warningDates[0]} was saved with expenses only. Add hours or income later if this should count as a worked day.`
+          : `These dates were saved with expenses only:\n\n${warningDates.join('\n')}\n\nAdd hours or income later if any of them should count as worked days.`
 
-        setSoftWarning({
-          title: warningDates.length === 1 ? 'Expense-only day saved' : 'Expense-only days saved',
-          body: combinedBody,
-        })
-        setFormMessage('Saved daily reports with a small warning.')
-        showSaveToast('Saved daily reports with a warning.')
-      } else {
-        setFormMessage('Saved daily reports.')
-        showSaveToast('Saved daily reports.')
-      }
+      setSoftWarning({
+        title: warningDates.length === 1 ? 'Expense-only day saved' : 'Expense-only days saved',
+        body: combinedBody,
+      })
     }
 
-    return didSaveContinue !== false
+    return wasSaved
+  }
+
+  const markDraftsSaved = () => {
+    dayInputDraftsRef.current = {}
+    setDayInputDrafts({})
+    setInvalidFieldsByDate({})
+    onUnsavedDayInputDraftsChange?.(false)
+
+    if (userId) {
+      clearUserReportDayFormDrafts(userId)
+    }
+  }
+
+  const discardDraftForDate = (dateKey: string) => {
+    const nextValue = { ...dayInputDraftsRef.current }
+    delete nextValue[dateKey]
+    dayInputDraftsRef.current = nextValue
+    setDayInputDrafts(nextValue)
+    setInvalidFieldsByDate((currentValue) => {
+      const nextInvalid = { ...currentValue }
+      delete nextInvalid[dateKey]
+      return nextInvalid
+    })
   }
 
   const discardDayInputDrafts = () => {
@@ -1289,7 +1007,9 @@ export function DailyLog({
   useEffect(() => {
     onRegisterNavigationHandlers?.({
       discard: discardDayInputDrafts,
-      save: handleSaveAllEntries,
+      discardDraftForDate,
+      markSaved: markDraftsSaved,
+      save: () => handleSaveAllEntries(),
     })
 
     return () => {
@@ -1315,6 +1035,7 @@ export function DailyLog({
       hours: 0,
       invoicedIncome: 0,
       expenses: resolvedExpenses,
+      updatedAt: selectedEntry?.updatedAt,
     })
     setHours('')
     setHourlyRate('')
@@ -1370,6 +1091,7 @@ export function DailyLog({
       hours: 0,
       invoicedIncome: 0,
       expenses: resolvedExpenses,
+      updatedAt: selectedEntry?.updatedAt,
     })
     setHours('')
     setHourlyRate('')
@@ -1399,6 +1121,7 @@ export function DailyLog({
         hours: 0,
         invoicedIncome: 0,
         expenses: resolvedExpenses,
+        updatedAt: selectedEntry?.updatedAt,
       })
     } else {
       onRemoveEntryForDate(date)
@@ -1439,7 +1162,7 @@ export function DailyLog({
     })
   }
 
-  const handleConfirmDeleteEntry = () => {
+  const handleConfirmDeleteEntry = async () => {
     if (!pendingDeleteEntry) {
       return
     }
@@ -1447,9 +1170,14 @@ export function DailyLog({
     const deletedDateKey = pendingDeleteEntry.date
     const isSavedEntry = savedEntryDateKeys.has(deletedDateKey)
 
+    setPendingDeleteEntry(null)
     syncSelectedDate(deletedDateKey)
     if (isSavedEntry) {
-      onDeleteSavedEntryImmediately(deletedDateKey)
+      const wasDeleted = await onDeleteSavedEntryImmediately(deletedDateKey)
+
+      if (!wasDeleted) {
+        return
+      }
     } else {
       onRemoveEntryForDate(deletedDateKey)
     }
@@ -1565,7 +1293,27 @@ export function DailyLog({
   const flatHourlyRate = hourlyRate.trim() !== '' ? parseNumber(hourlyRate) : configuredHourlyRate
   const isEditorDisabled = isSelectedMonthEmployment
 
+  // Saved before the app stored how a day was priced: shown (and kept) as a total.
+  const isLegacyTotalDay =
+    !!selectedEntry &&
+    (selectedEntry.dayStatus ?? 'worked') === 'worked' &&
+    !selectedEntry.workItems?.length &&
+    selectedEntry.pricingMode == null &&
+    getEntryInvoicedIncome(selectedEntry) > 0
+
   const renderFlatCalculation = () => {
+    if (isUsingTotalIncome && isLegacyTotalDay && totalIncome === selectedEntryDraft.totalIncome) {
+      return (
+        <>
+          Saved before the app recorded hourly or fixed pricing, so it&apos;s kept as a total of{' '}
+          <span className="font-semibold text-[#f3e4cf]">
+            {formatCurrencyPrecise(parseNumber(totalIncome))}
+          </span>
+          . Clear the total to calculate from hours × rate instead.
+        </>
+      )
+    }
+
     if (isUsingTotalIncome) {
       const total = parseNumber(totalIncome)
 
@@ -1686,7 +1434,7 @@ export function DailyLog({
         }
         isOpen={pendingDeleteEntry !== null}
         onClose={() => setPendingDeleteEntry(null)}
-        onPrimaryAction={handleConfirmDeleteEntry}
+        onPrimaryAction={() => void handleConfirmDeleteEntry()}
         onSecondaryAction={() => setPendingDeleteEntry(null)}
         primaryActionLabel="Delete"
         secondaryActionLabel="Cancel"
@@ -1898,6 +1646,14 @@ export function DailyLog({
                     const rowHourlyRate = parseNumber(workItem.hourlyRate)
                     const rowTotal = parseNumber(workItem.invoicedIncome)
                     const isUsingRowTotal = workItem.invoicedIncome.trim() !== ''
+                    const savedWorkItem = selectedEntry?.workItems?.find(
+                      (item) => item.id !== undefined && item.id === workItem.id,
+                    )
+                    const isLegacyRowTotal =
+                      isUsingRowTotal &&
+                      savedWorkItem?.pricingMode == null &&
+                      savedWorkItem !== undefined &&
+                      parseNumber(workItem.invoicedIncome) === savedWorkItem.invoicedIncome
 
                     return (
                       <div
@@ -1911,7 +1667,7 @@ export function DailyLog({
                               ref={(element) => {
                                 projectNameInputRefs.current[workItem.lineIndex] = element
                               }}
-                              className={inputClassName(false, 'py-2.5 text-sm')}
+                              className={inputClassName(false, 'py-2.5')}
                               disabled={isEditorDisabled}
                               placeholder="e.g. Handyman"
                               type="text"
@@ -1934,7 +1690,7 @@ export function DailyLog({
                           <label className="block min-w-0">
                             <FieldLabel>Hours</FieldLabel>
                             <input
-                              className={inputClassName(false, 'px-3 py-2.5 text-sm')}
+                              className={inputClassName(false, 'px-3 py-2.5')}
                               disabled={isEditorDisabled}
                               inputMode="decimal"
                               min="0"
@@ -1949,7 +1705,7 @@ export function DailyLog({
                           <label className={cx('block min-w-0 transition', isUsingRowTotal && 'opacity-50')}>
                             <FieldLabel>Rate €/h</FieldLabel>
                             <input
-                              className={inputClassName(false, 'px-3 py-2.5 text-sm')}
+                              className={inputClassName(false, 'px-3 py-2.5')}
                               disabled={isEditorDisabled}
                               inputMode="decimal"
                               min="0"
@@ -1964,7 +1720,7 @@ export function DailyLog({
                           <label className="block min-w-0">
                             <FieldLabel>Total €</FieldLabel>
                             <input
-                              className={inputClassName(false, 'px-3 py-2.5 text-sm')}
+                              className={inputClassName(false, 'px-3 py-2.5')}
                               disabled={isEditorDisabled}
                               inputMode="decimal"
                               min="0"
@@ -1979,7 +1735,9 @@ export function DailyLog({
                           </label>
                         </div>
                         <p className="text-xs text-[#a88c71]">
-                          {isUsingRowTotal && rowHours > 0 && rowTotal > 0
+                          {isLegacyRowTotal
+                            ? 'Saved before hourly or fixed pricing was recorded, so it’s kept as this total. Clear the total to use hours × rate.'
+                            : isUsingRowTotal && rowHours > 0 && rowTotal > 0
                             ? `Works out to ${formatCurrencyPrecise(rowTotal / rowHours)} per hour.`
                             : rowHours > 0 && rowHourlyRate > 0
                               ? `${formatHoursPrecise(rowHours)} × ${formatCurrencyPrecise(rowHourlyRate)} = ${formatCurrencyPrecise(rowHours * rowHourlyRate)}`
@@ -2187,13 +1945,14 @@ export function DailyLog({
 
       <SaveBar
         detail="Kept on this device"
+        isSaving={isSaving}
         onDiscard={() => setIsDiscardConfirmOpen(true)}
         onSave={() => {
-          handleSaveAllEntries()
+          void handleSaveAllEntries()
         }}
         saveLabel="Save reports"
         title="Unsaved reports"
-        visible={hasUnsavedChanges}
+        visible={hasUnsavedChanges || isSaving}
       />
     </>
   )

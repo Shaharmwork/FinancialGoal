@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import {
   Configuration as ConfigurationScreen,
   type ConfigurationNavigationHandlers,
+  type ConfigurationSaveResult,
 } from "@/components/configuration";
 import {
   DailyLog,
@@ -16,21 +17,40 @@ import { PhoneStage } from "@/components/phone-stage";
 import { Toast } from "@/components/ui/kit";
 import { WarningModal } from "@/components/warning-modal";
 import {
+  deleteDailyEntryRemote,
+  deleteMonthlySummaryRemote,
   loadRemoteAppData,
-  saveDailyEntriesToSupabase,
-  saveMonthlySummariesToSupabase,
-  saveSettingsToSupabase,
+  saveDailyEntryRemote,
+  saveMonthlySummaryRemote,
+  saveSettingsRemote,
 } from "@/lib/app-data-store";
-import { toDateKey } from "@/lib/calculations";
+import { sortMonthlySummaries, toDateKey } from "@/lib/calculations";
+import {
+  applyReportOverlay,
+  diffMonthlySummaries,
+  diffReportOverlay,
+  EMPTY_REPORT_OVERLAY,
+  fingerprintOf,
+  isReportOverlayEmpty,
+  isSameSettingsContent,
+  mergeListIntoOverlay,
+  MutationIds,
+  pruneReportOverlay,
+  runMutations,
+  type ConflictReason,
+  type EntryMutation,
+  type MutationOutcome,
+  type ReportOverlay,
+} from "@/lib/sync";
 import { starterStoredState } from "@/lib/default-state";
 import {
   clearStoredUiPreferences,
   clearUserReportDayFormDrafts,
-  clearUserReportDraftEntries,
+  clearUserReportOverlay,
   getUserCurrentScreen,
-  getUserReportDraftEntries,
+  getUserReportOverlay,
   updateUserCurrentScreen,
-  updateUserReportDraftEntries,
+  updateUserReportOverlay,
 } from "@/lib/ui-preferences";
 import {
   getCurrentSession,
@@ -39,7 +59,7 @@ import {
   signInWithEmailPassword,
   signOutFromSupabase,
 } from "@/lib/supabase";
-import type { DailyEntry, MonthlySummary, Screen, Settings, WorkItem } from "@/lib/types";
+import type { DailyEntry, MonthlySummary, Screen, Settings } from "@/lib/types";
 
 const CONFIG_SCREEN_INTENT_KEY = "configuration-screen-intent";
 const CONFIG_SCREEN_FOCUS_TARGET_KEY = "configuration-screen-focus-target";
@@ -125,84 +145,9 @@ function keepSessionForSameUser(
   return nextSession;
 }
 
-function cloneEntries(entries: DailyEntry[]) {
-  return entries.map((entry) => ({
-    ...entry,
-    workItems: entry.workItems?.map((workItem) => ({ ...workItem })),
-  }));
-}
-
-function removeEntryByDate(entries: DailyEntry[], dateKey: string) {
-  return entries.filter((entry) => entry.date !== dateKey);
-}
-
-function getComparableEntries(entries: DailyEntry[]) {
-  return [...entries].sort((left, right) =>
-    left.date.localeCompare(right.date),
-  );
-}
-
-function getComparableWorkItems(workItems: WorkItem[] | undefined) {
-  return [...(workItems ?? [])].sort((left, right) => {
-    const lineComparison = left.lineIndex - right.lineIndex;
-
-    if (lineComparison !== 0) {
-      return lineComparison;
-    }
-
-    return left.projectName.localeCompare(right.projectName);
-  });
-}
-
-function areWorkItemsEqual(left: WorkItem[] | undefined, right: WorkItem[] | undefined) {
-  const comparableLeft = getComparableWorkItems(left);
-  const comparableRight = getComparableWorkItems(right);
-
-  if (comparableLeft.length !== comparableRight.length) {
-    return false;
-  }
-
-  return comparableLeft.every((leftWorkItem, index) => {
-    const rightWorkItem = comparableRight[index];
-
-    return (
-      leftWorkItem.projectName === rightWorkItem.projectName &&
-      leftWorkItem.hours === rightWorkItem.hours &&
-      leftWorkItem.hourlyRate === rightWorkItem.hourlyRate &&
-      leftWorkItem.invoicedIncome === rightWorkItem.invoicedIncome &&
-      leftWorkItem.lineIndex === rightWorkItem.lineIndex
-    );
-  });
-}
-
-function areEntriesEqual(left: DailyEntry[], right: DailyEntry[]) {
-  if (left.length !== right.length) {
-    return false;
-  }
-
-  const comparableLeft = getComparableEntries(left);
-  const comparableRight = getComparableEntries(right);
-
-  return comparableLeft.every((leftEntry, index) => {
-    const rightEntry = comparableRight[index];
-
-    return (
-      leftEntry.date === rightEntry.date &&
-      (leftEntry.dayStatus ?? "worked") ===
-        (rightEntry.dayStatus ?? "worked") &&
-      leftEntry.hours === rightEntry.hours &&
-      leftEntry.invoicedIncome === rightEntry.invoicedIncome &&
-      leftEntry.expenses === rightEntry.expenses &&
-      (leftEntry.note ?? "") === (rightEntry.note ?? "") &&
-      (leftEntry.source ?? "") === (rightEntry.source ?? "") &&
-      areWorkItemsEqual(leftEntry.workItems, rightEntry.workItems)
-    );
-  });
-}
-
-type PersistedEntriesSnapshot = {
-  entries: DailyEntry[];
-  userId: string;
+type ReportConflict = {
+  date: string;
+  reason: ConflictReason;
 };
 
 function hasFutureDatedEntries(entries: DailyEntry[], todayDateKey: string) {
@@ -256,12 +201,13 @@ export default function Home() {
   const [currentScreen, setCurrentScreen] = useState<Screen>(
     starterStoredState.currentScreen,
   );
+  // Saved data, exactly as last loaded from or confirmed by Supabase.
   const [entries, setEntries] = useState<DailyEntry[]>(
     starterStoredState.entries,
   );
-  const [reportDraftEntries, setReportDraftEntries] = useState<
-    DailyEntry[] | null
-  >(null);
+  // Unsaved report changes: edited days and explicit deletions only.
+  const [reportOverlay, setReportOverlay] =
+    useState<ReportOverlay>(EMPTY_REPORT_OVERLAY);
   const [monthlySummaries, setMonthlySummaries] = useState<MonthlySummary[]>(
     starterStoredState.monthlySummaries,
   );
@@ -273,6 +219,9 @@ export default function Home() {
   const [loadedRemoteUserId, setLoadedRemoteUserId] = useState<string | null>(
     null,
   );
+  // Set when the initial load failed. Nothing can be written until a load succeeds.
+  const [loadErrorMessage, setLoadErrorMessage] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [displayName, setDisplayName] = useState<string | undefined>(undefined);
   const [settingsFocusRequest, setSettingsFocusRequest] = useState(0);
   const [backfillFocusRequest, setBackfillFocusRequest] = useState(0);
@@ -291,6 +240,7 @@ export default function Home() {
     useState<string | undefined>(undefined);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const [isSignOutConfirmOpen, setIsSignOutConfirmOpen] = useState(false);
   const [isUnsavedReportModalOpen, setIsUnsavedReportModalOpen] =
     useState(false);
   const [isUnsavedConfigurationModalOpen, setIsUnsavedConfigurationModalOpen] =
@@ -310,8 +260,12 @@ export default function Home() {
   >(null);
   const [pendingScreen, setPendingScreen] = useState<Screen | null>(null);
   const [toastErrorMessage, setToastErrorMessage] = useState("");
-  const [entriesSaveAttempt, setEntriesSaveAttempt] = useState(0);
-  const [hasHydratedReportDraftEntries, setHasHydratedReportDraftEntries] =
+  const [toastSuccessMessage, setToastSuccessMessage] = useState("");
+  const [isSavingReport, setIsSavingReport] = useState(false);
+  const [reportConflict, setReportConflict] = useState<ReportConflict | null>(
+    null,
+  );
+  const [hasHydratedReportOverlay, setHasHydratedReportOverlay] =
     useState(false);
   const [hasUnsavedReportFieldDrafts, setHasUnsavedReportFieldDrafts] =
     useState(false);
@@ -322,16 +276,40 @@ export default function Home() {
   const dailyLogNavigationHandlersRef =
     useRef<DailyLogNavigationHandlers | null>(null);
   const entriesRef = useRef(entries);
-  const lastPersistedEntriesRef = useRef<PersistedEntriesSnapshot | null>(null);
-  const hasUnsavedReportEntryChanges =
-    reportDraftEntries !== null &&
-    !areEntriesEqual(reportDraftEntries, entries);
+  const reportOverlayRef = useRef(reportOverlay);
+  const monthlySummariesRef = useRef(monthlySummaries);
+  const settingsRef = useRef(settings);
+  // One save at a time, so saves can't overlap or finish out of order.
+  const saveLockRef = useRef(false);
+  const mutationIdsRef = useRef(new MutationIds());
+  const lastRefreshAtRef = useRef(0);
+  const reportEntries = useMemo(
+    () => applyReportOverlay(entries, reportOverlay),
+    [entries, reportOverlay],
+  );
+  const hasUnsavedReportEntryChanges = !isReportOverlayEmpty(
+    pruneReportOverlay(entries, reportOverlay),
+  );
   const hasUnsavedReportChanges =
     hasUnsavedReportEntryChanges || hasUnsavedReportFieldDrafts;
+  const hasAnyUnsavedChanges =
+    hasUnsavedReportChanges || hasUnsavedConfigurationChanges;
 
   useEffect(() => {
     entriesRef.current = entries;
   }, [entries]);
+
+  useEffect(() => {
+    reportOverlayRef.current = reportOverlay;
+  }, [reportOverlay]);
+
+  useEffect(() => {
+    monthlySummariesRef.current = monthlySummaries;
+  }, [monthlySummaries]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   useEffect(() => {
     let isActive = true;
@@ -416,7 +394,7 @@ export default function Home() {
       setHasLoadedRemoteState(false);
       setLoadedRemoteUserId(null);
       setDisplayName(undefined);
-      lastPersistedEntriesRef.current = null;
+      setLoadErrorMessage("");
       return;
     }
 
@@ -424,7 +402,7 @@ export default function Home() {
     const userId = session.user.id;
     setHasLoadedRemoteState(false);
     setLoadedRemoteUserId(null);
-    lastPersistedEntriesRef.current = null;
+    setLoadErrorMessage("");
 
     void loadRemoteAppData()
       .then((remoteData) => {
@@ -432,17 +410,21 @@ export default function Home() {
           return;
         }
 
-        lastPersistedEntriesRef.current = {
-          entries: cloneEntries(remoteData.entries),
-          userId,
-        };
+        const storedOverlay = getUserReportOverlay(userId);
         setEntries(remoteData.entries);
+        setReportOverlay(
+          storedOverlay
+            ? pruneReportOverlay(remoteData.entries, storedOverlay)
+            : EMPTY_REPORT_OVERLAY,
+        );
+        setHasHydratedReportOverlay(true);
         setMonthlySummaries(remoteData.monthlySummaries);
         setSettings(remoteData.settings);
         setDisplayName(remoteData.displayName);
         setIsReportsAlertDismissedForSession(false);
         setLoadedRemoteUserId(userId);
         setHasLoadedRemoteState(true);
+        lastRefreshAtRef.current = Date.now();
       })
       .catch((error) => {
         console.error("[Financial Goal] Failed to load Supabase data.", error);
@@ -450,19 +432,17 @@ export default function Home() {
           return;
         }
 
-        lastPersistedEntriesRef.current = {
-          entries: cloneEntries(entriesRef.current),
-          userId,
-        };
-        setDisplayName(undefined);
-        setLoadedRemoteUserId(userId);
-        setHasLoadedRemoteState(true);
+        // Stay "not loaded": the screens (and every save) stay disabled until a
+        // load succeeds, so an empty screen can never be saved over real data.
+        setLoadErrorMessage(
+          getErrorMessage(error, "Your data couldn't be loaded."),
+        );
       });
 
     return () => {
       isActive = false;
     };
-  }, [hasCheckedSession, session]);
+  }, [hasCheckedSession, loadAttempt, session]);
 
   useEffect(() => {
     const userId = session?.user?.id;
@@ -478,12 +458,12 @@ export default function Home() {
       setShouldShowDashboardGreeting(false);
       setCurrentScreen("dashboard");
       setEntries(starterStoredState.entries);
-      setReportDraftEntries(null);
+      setReportOverlay(EMPTY_REPORT_OVERLAY);
       setMonthlySummaries(starterStoredState.monthlySummaries);
       setSettings(starterStoredState.settings);
       setDisplayName(undefined);
       setHasLoadedRemoteState(false);
-      setHasHydratedReportDraftEntries(false);
+      setHasHydratedReportOverlay(false);
       setHasUnsavedReportFieldDrafts(false);
       setHasUnsavedConfigurationChanges(false);
       setLoadedRemoteUserId(null);
@@ -491,12 +471,12 @@ export default function Home() {
       setPendingScreen(null);
       setPendingSummaryConflictSaveEntries(null);
       setPendingFutureSaveEntries(null);
+      setReportConflict(null);
       setIsUnsavedReportModalOpen(false);
       setIsUnsavedConfigurationModalOpen(false);
       setIsSummaryConflictWarningOpen(false);
       setIsEmploymentMonthWarningOpen(false);
       setIsFutureReportWarningOpen(false);
-      lastPersistedEntriesRef.current = null;
       return;
     }
 
@@ -519,165 +499,254 @@ export default function Home() {
     updateUserCurrentScreen(userId, currentScreen);
   }, [currentScreen, session]);
 
+  // Keep unsaved report changes on this device until they're saved or discarded.
   useEffect(() => {
     const userId = session?.user?.id;
 
-    if (!userId || !hasLoadedRemoteState || loadedRemoteUserId !== userId) {
+    if (!userId || !hasLoadedRemoteState || !hasHydratedReportOverlay) {
       return;
     }
 
-    setReportDraftEntries(getUserReportDraftEntries(userId));
-    setHasHydratedReportDraftEntries(true);
-  }, [hasLoadedRemoteState, loadedRemoteUserId, session]);
+    const pendingOverlay = pruneReportOverlay(entries, reportOverlay);
 
-  useEffect(() => {
-    const userId = session?.user?.id;
-
-    if (!userId || !hasLoadedRemoteState || loadedRemoteUserId !== userId) {
+    if (isReportOverlayEmpty(pendingOverlay)) {
+      clearUserReportOverlay(userId);
       return;
     }
 
-    const lastPersistedEntries = lastPersistedEntriesRef.current;
-
-    if (
-      lastPersistedEntries?.userId === userId &&
-      areEntriesEqual(entries, lastPersistedEntries.entries)
-    ) {
-      return;
-    }
-
-    let retryTimeoutId: number | undefined;
-
-    void saveDailyEntriesToSupabase(entries)
-      .then(() => {
-        lastPersistedEntriesRef.current = {
-          entries: cloneEntries(entries),
-          userId,
-        };
-        setEntriesSaveAttempt(0);
-      })
-      .catch((error) => {
-        console.error("[Financial Goal] Failed to save daily entries.", error);
-        // The reports stay on screen; retry a few times before giving up.
-        if (entriesSaveAttempt < 3) {
-          setToastErrorMessage("Couldn't save your reports. Retrying…");
-          retryTimeoutId = window.setTimeout(() => {
-            setEntriesSaveAttempt((currentValue) => currentValue + 1);
-          }, 4000);
-          return;
-        }
-
-        setToastErrorMessage(
-          "Your reports couldn't be saved. Check your connection and save again.",
-        );
-      });
-
-    return () => {
-      if (retryTimeoutId !== undefined) {
-        window.clearTimeout(retryTimeoutId);
-      }
-    };
-  }, [entries, entriesSaveAttempt, hasLoadedRemoteState, loadedRemoteUserId, session]);
-
-  useEffect(() => {
-    const userId = session?.user?.id;
-
-    if (!userId || !hasLoadedRemoteState) {
-      return;
-    }
-
-    if (
-      reportDraftEntries !== null &&
-      !areEntriesEqual(reportDraftEntries, entries)
-    ) {
-      updateUserReportDraftEntries(userId, reportDraftEntries);
-      return;
-    }
-
-    clearUserReportDraftEntries(userId);
-  }, [entries, hasLoadedRemoteState, reportDraftEntries, session]);
-
-  useEffect(() => {
-    if (currentScreen !== "daily-log") {
-      return;
-    }
-
-    if (!hasLoadedRemoteState || !hasHydratedReportDraftEntries) {
-      return;
-    }
-
-    if (reportDraftEntries === null) {
-      setReportDraftEntries(cloneEntries(entries));
-      return;
-    }
-
-    if (
-      !hasUnsavedReportChanges &&
-      !areEntriesEqual(reportDraftEntries, entries)
-    ) {
-      setReportDraftEntries(cloneEntries(entries));
-    }
-  }, [
-    currentScreen,
-    entries,
-    hasHydratedReportDraftEntries,
-    hasLoadedRemoteState,
-    hasUnsavedReportChanges,
-    reportDraftEntries,
-  ]);
+    updateUserReportOverlay(userId, pendingOverlay);
+  }, [entries, hasHydratedReportOverlay, hasLoadedRemoteState, reportOverlay, session]);
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: "auto" });
   }, [currentScreen]);
 
-  const handleUpsertEntry = useCallback(
-    (entry: DailyEntry) => {
-      setReportDraftEntries((previousEntries) => {
-        const draftEntries = previousEntries ?? cloneEntries(entries);
+  const showSuccess = useCallback((message: string) => {
+    setToastErrorMessage("");
+    setToastSuccessMessage(message);
+  }, []);
 
-        return [
-          entry,
-          ...draftEntries.filter(
-            (previousEntry) => previousEntry.date !== entry.date,
-          ),
-        ];
+  const showError = useCallback((message: string) => {
+    setToastSuccessMessage("");
+    setToastErrorMessage(message);
+  }, []);
+
+  // Reload everything from Supabase. Unsaved changes are untouched: report edits
+  // live in the overlay and configuration drafts are rebased by that screen.
+  const refreshRemoteData = useCallback(async () => {
+    const remoteData = await loadRemoteAppData();
+    setEntries(remoteData.entries);
+    setReportOverlay((currentOverlay) =>
+      pruneReportOverlay(remoteData.entries, currentOverlay),
+    );
+    setMonthlySummaries(remoteData.monthlySummaries);
+    setSettings(remoteData.settings);
+    entriesRef.current = remoteData.entries;
+    monthlySummariesRef.current = remoteData.monthlySummaries;
+    settingsRef.current = remoteData.settings;
+    lastRefreshAtRef.current = Date.now();
+    return remoteData;
+  }, []);
+
+  // Pick up changes from other devices when coming back to the app, but only
+  // when there's nothing unsaved here.
+  useEffect(() => {
+    if (!hasLoadedRemoteState) {
+      return;
+    }
+
+    const handleVisibilityChange = () => {
+      if (
+        document.visibilityState !== "visible" ||
+        saveLockRef.current ||
+        hasAnyUnsavedChanges ||
+        Date.now() - lastRefreshAtRef.current < 30_000
+      ) {
+        return;
+      }
+
+      void refreshRemoteData().catch((error) => {
+        console.warn("[Financial Goal] Background refresh failed.", error);
       });
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [hasAnyUnsavedChanges, hasLoadedRemoteState, refreshRemoteData]);
+
+  const performEntryMutation = useCallback(
+    async (mutation: EntryMutation): Promise<MutationOutcome<DailyEntry>> => {
+      const fingerprint = fingerprintOf(mutation);
+      const mutationId = mutationIdsRef.current.idFor(fingerprint);
+      const outcome =
+        mutation.kind === "save"
+          ? await saveDailyEntryRemote(
+              mutation.entry,
+              mutation.expectedUpdatedAt,
+              mutationId,
+            )
+          : await deleteDailyEntryRemote(mutation.id, mutation.expectedUpdatedAt);
+
+      if (outcome.status !== "conflict") {
+        mutationIdsRef.current.forget(fingerprint);
+      }
+
+      return outcome;
     },
-    [entries],
+    [],
   );
 
-  const handleRemoveEntryForDate = useCallback(
-    (dateKey: string) => {
-      setReportDraftEntries((previousEntries) => {
-        const draftEntries = previousEntries ?? cloneEntries(entries);
-        return draftEntries.filter(
-          (previousEntry) => previousEntry.date !== dateKey,
+  // Saves the given report changes. Only after Supabase confirms each change is it
+  // treated as saved; anything not confirmed stays in the overlay for a retry.
+  const persistReportOverlay = useCallback(
+    async (overlayToSave: ReportOverlay): Promise<boolean> => {
+      if (saveLockRef.current) {
+        return false;
+      }
+
+      saveLockRef.current = true;
+      setIsSavingReport(true);
+
+      try {
+        const mutations = diffReportOverlay(entriesRef.current, overlayToSave);
+        const run = await runMutations(mutations, performEntryMutation);
+        let nextEntries = entriesRef.current;
+
+        run.applied.forEach(({ mutation, outcome }) => {
+          nextEntries = nextEntries.filter((entry) => entry.date !== mutation.key);
+
+          if (outcome.status === "saved") {
+            nextEntries = [outcome.value, ...nextEntries];
+          }
+        });
+
+        entriesRef.current = nextEntries;
+        setEntries(nextEntries);
+        // Prune the current overlay (not just what was sent): edits made elsewhere,
+        // or while this save ran, must survive.
+        const remainingOverlay = pruneReportOverlay(
+          nextEntries,
+          reportOverlayRef.current,
         );
-      });
+        reportOverlayRef.current = remainingOverlay;
+        setReportOverlay(remainingOverlay);
+
+        if (run.status === "done") {
+          return true;
+        }
+
+        if (run.status === "conflict" && run.conflict) {
+          setReportConflict({
+            date: run.conflict.mutation.key,
+            reason: run.conflict.reason,
+          });
+          return false;
+        }
+
+        showError(
+          `${getErrorMessage(run.error, "Saving failed.")} Your changes are kept on this device. Tap Save to try again.`,
+        );
+        return false;
+      } finally {
+        saveLockRef.current = false;
+        setIsSavingReport(false);
+      }
     },
-    [entries],
+    [performEntryMutation, showError],
   );
 
-  const handleDeleteSavedEntryImmediately = useCallback((dateKey: string) => {
-    setEntries((previousEntries) => {
-      const nextSavedEntries = removeEntryByDate(previousEntries, dateKey);
-
-      setReportDraftEntries((previousDraftEntries) =>
-        removeEntryByDate(
-          previousDraftEntries ?? cloneEntries(nextSavedEntries),
-          dateKey,
-        ),
+  const persistReportEntriesList = useCallback(
+    async (entriesToSave: DailyEntry[]) => {
+      const nextOverlay = mergeListIntoOverlay(
+        entriesRef.current,
+        reportOverlayRef.current,
+        entriesToSave,
       );
+      reportOverlayRef.current = nextOverlay;
+      setReportOverlay(nextOverlay);
+      return persistReportOverlay(nextOverlay);
+    },
+    [persistReportOverlay],
+  );
 
-      return nextSavedEntries;
+  const finishReportSave = useCallback(() => {
+    dailyLogNavigationHandlersRef.current?.markSaved();
+    setHasUnsavedReportFieldDrafts(false);
+    showSuccess("Reports saved.");
+  }, [showSuccess]);
+
+  const handleUpsertEntry = useCallback((entry: DailyEntry) => {
+    setReportOverlay((currentOverlay) =>
+      mergeListIntoOverlay(entriesRef.current, currentOverlay, [entry]),
+    );
+  }, []);
+
+  const handleRemoveEntryForDate = useCallback((dateKey: string) => {
+    setReportOverlay((currentOverlay) => {
+      const savedEntry = entriesRef.current.find(
+        (entry) => entry.date === dateKey,
+      );
+      const baseEntry = currentOverlay.entries[dateKey] ?? savedEntry;
+      const { [dateKey]: _removedEntry, ...remainingEntries } =
+        currentOverlay.entries;
+      const deletions = { ...currentOverlay.deletions };
+
+      if (savedEntry?.updatedAt) {
+        deletions[dateKey] = {
+          id: savedEntry.id,
+          updatedAt: baseEntry?.updatedAt ?? savedEntry.updatedAt,
+        };
+      }
+
+      return pruneReportOverlay(entriesRef.current, {
+        entries: remainingEntries,
+        deletions,
+      });
     });
   }, []);
 
-  const proceedToScreen = (screen: Screen) => {
-    if (screen === "daily-log" && reportDraftEntries === null) {
-      setReportDraftEntries(cloneEntries(entries));
-    }
+  // Deleting a saved day from the list happens right away, version-checked.
+  const handleDeleteSavedEntryImmediately = useCallback(
+    async (dateKey: string) => {
+      const savedEntry = entriesRef.current.find(
+        (entry) => entry.date === dateKey,
+      );
 
+      if (!savedEntry?.updatedAt) {
+        handleRemoveEntryForDate(dateKey);
+        return true;
+      }
+
+      const baseVersion =
+        reportOverlayRef.current.entries[dateKey]?.updatedAt ??
+        savedEntry.updatedAt;
+      const deleteOverlay: ReportOverlay = {
+        entries: {},
+        deletions: {
+          [dateKey]: { id: savedEntry.id, updatedAt: baseVersion },
+        },
+      };
+      const wasDeleted = await persistReportOverlay(deleteOverlay);
+
+      if (wasDeleted) {
+        setReportOverlay((currentOverlay) => {
+          const { [dateKey]: _removedEntry, ...remainingEntries } =
+            currentOverlay.entries;
+          const { [dateKey]: _removedDeletion, ...remainingDeletions } =
+            currentOverlay.deletions;
+          return { entries: remainingEntries, deletions: remainingDeletions };
+        });
+        showSuccess("Day deleted.");
+      }
+
+      return wasDeleted;
+    },
+    [handleRemoveEntryForDate, persistReportOverlay, showSuccess],
+  );
+
+  const proceedToScreen = (screen: Screen) => {
     if (screen === "daily-log") {
       setReportResetRequest((currentValue) => currentValue + 1);
     }
@@ -685,35 +754,26 @@ export default function Home() {
     setCurrentScreen(screen);
   };
 
-  const commitReportEntries = (entriesToSave: DailyEntry[]) => {
-    setEntries(cloneEntries(entriesToSave));
-    setReportDraftEntries(cloneEntries(entriesToSave));
-    setHasUnsavedReportFieldDrafts(false);
-    const userId = session?.user?.id;
-
-    if (userId) {
-      clearUserReportDayFormDrafts(userId);
-      clearUserReportDraftEntries(userId);
-    }
-  };
-
-  const finishSavingReportEntries = (entriesToSave: DailyEntry[]) => {
+  const saveReportAfterChecks = async (entriesToSave: DailyEntry[]) => {
     if (hasFutureDatedEntries(entriesToSave, todayDateKey)) {
-      setPendingFutureSaveEntries(cloneEntries(entriesToSave));
+      setPendingFutureSaveEntries(entriesToSave);
       setIsFutureReportWarningOpen(true);
       return false;
     }
 
-    commitReportEntries(entriesToSave);
-    return true;
+    const wasSaved = await persistReportEntriesList(entriesToSave);
+
+    if (wasSaved) {
+      finishReportSave();
+    }
+
+    return wasSaved;
   };
 
-  const handleSaveReportEntries = (nextEntries?: DailyEntry[]) => {
-    const entriesToSave = nextEntries ?? reportDraftEntries;
-
-    if (entriesToSave === null || !entriesToSave) {
-      return true;
-    }
+  // Called by the Report screen with its full list of days (including unsaved
+  // field edits). Resolves true once Supabase confirmed every change.
+  const handleSaveReportEntries = async (nextEntries?: DailyEntry[]) => {
+    const entriesToSave = nextEntries ?? reportEntries;
 
     if (
       getEmploymentSummaryConflictMonthKeys(entriesToSave, monthlySummaries)
@@ -727,22 +787,96 @@ export default function Home() {
       getNewSummaryConflictMonthKeys(entries, entriesToSave, monthlySummaries)
         .length > 0
     ) {
-      setPendingSummaryConflictSaveEntries(cloneEntries(entriesToSave));
+      setPendingSummaryConflictSaveEntries(entriesToSave);
       setIsSummaryConflictWarningOpen(true);
       return false;
     }
 
-    return finishSavingReportEntries(entriesToSave);
+    return saveReportAfterChecks(entriesToSave);
   };
 
   const handleDiscardReportEntries = () => {
-    setReportDraftEntries(cloneEntries(entries));
+    setReportOverlay(EMPTY_REPORT_OVERLAY);
     setHasUnsavedReportFieldDrafts(false);
     const userId = session?.user?.id;
 
     if (userId) {
       clearUserReportDayFormDrafts(userId);
-      clearUserReportDraftEntries(userId);
+      clearUserReportOverlay(userId);
+    }
+  };
+
+  // Conflict choice: drop my change for that day and show the other device's version.
+  const handleUseOtherReportVersion = async () => {
+    const conflict = reportConflict;
+
+    if (!conflict) {
+      return;
+    }
+
+    try {
+      await refreshRemoteData();
+      setReportOverlay((currentOverlay) => {
+        const { [conflict.date]: _entry, ...entriesWithout } =
+          currentOverlay.entries;
+        const { [conflict.date]: _deletion, ...deletionsWithout } =
+          currentOverlay.deletions;
+        return { entries: entriesWithout, deletions: deletionsWithout };
+      });
+      dailyLogNavigationHandlersRef.current?.discardDraftForDate(conflict.date);
+      setReportConflict(null);
+      showSuccess("Loaded the latest version of that day.");
+    } catch (error) {
+      showError(getErrorMessage(error, "Couldn't load the latest version."));
+    }
+  };
+
+  // Conflict choice (explicit): replace the other device's version with mine.
+  const handleOverwriteReportVersion = async () => {
+    const conflict = reportConflict;
+
+    if (!conflict) {
+      return;
+    }
+
+    try {
+      const remoteData = await refreshRemoteData();
+      const remoteEntry = remoteData.entries.find(
+        (entry) => entry.date === conflict.date,
+      );
+      const currentOverlay = reportOverlayRef.current;
+      const myEntry = currentOverlay.entries[conflict.date];
+      const nextOverlay: ReportOverlay = {
+        entries: { ...currentOverlay.entries },
+        deletions: { ...currentOverlay.deletions },
+      };
+
+      if (myEntry) {
+        nextOverlay.entries[conflict.date] = remoteEntry?.updatedAt
+          ? { ...myEntry, id: remoteEntry.id, updatedAt: remoteEntry.updatedAt }
+          : { ...myEntry, updatedAt: undefined };
+      }
+
+      if (currentOverlay.deletions[conflict.date]) {
+        if (remoteEntry?.updatedAt) {
+          nextOverlay.deletions[conflict.date] = {
+            id: remoteEntry.id,
+            updatedAt: remoteEntry.updatedAt,
+          };
+        } else {
+          delete nextOverlay.deletions[conflict.date];
+        }
+      }
+
+      setReportConflict(null);
+      reportOverlayRef.current = nextOverlay;
+      setReportOverlay(nextOverlay);
+
+      if (await persistReportOverlay(nextOverlay)) {
+        finishReportSave();
+      }
+    } catch (error) {
+      showError(getErrorMessage(error, "Couldn't overwrite. Nothing was changed."));
     }
   };
 
@@ -798,17 +932,11 @@ export default function Home() {
     setCurrentScreen("configuration");
   }, []);
 
-  const handleFillMissingDays = useCallback(
-    (targetDateKey?: string) => {
-      setReportDraftEntries((previousEntries) =>
-        previousEntries ?? cloneEntries(entries),
-      );
-      setFillMissingDayTargetDateKey(targetDateKey);
-      setFillMissingDaysRequest((currentValue) => currentValue + 1);
-      setCurrentScreen("daily-log");
-    },
-    [entries],
-  );
+  const handleFillMissingDays = useCallback((targetDateKey?: string) => {
+    setFillMissingDayTargetDateKey(targetDateKey);
+    setFillMissingDaysRequest((currentValue) => currentValue + 1);
+    setCurrentScreen("daily-log");
+  }, []);
 
   const handleBackfillMissingMonth = useCallback((monthKey: string) => {
     if (typeof window !== "undefined") {
@@ -828,22 +956,109 @@ export default function Home() {
     setIsReportsAlertDismissedForSession(true);
   }, []);
 
+  // Saves changed settings and months, one version-checked change at a time.
+  // Months are never deleted here; that's always an explicit action.
   const handleSaveConfiguration = useCallback(
-    async (nextSettings: Settings, nextMonthlySummaries: MonthlySummary[]) => {
-      try {
-        await Promise.all([
-          saveSettingsToSupabase(nextSettings),
-          saveMonthlySummariesToSupabase(nextMonthlySummaries),
-        ]);
+    async (
+      nextSettings: Settings,
+      nextMonthlySummaries: MonthlySummary[],
+    ): Promise<ConfigurationSaveResult> => {
+      if (saveLockRef.current) {
+        return { status: "error", message: "Another save is still running." };
+      }
 
-        setSettings(nextSettings);
-        setMonthlySummaries(nextMonthlySummaries);
+      saveLockRef.current = true;
+
+      try {
+        if (!isSameSettingsContent(settingsRef.current, nextSettings)) {
+          const fingerprint = fingerprintOf(["settings", nextSettings]);
+          const outcome = await saveSettingsRemote(
+            nextSettings,
+            nextSettings.updatedAt ?? null,
+            mutationIdsRef.current.idFor(fingerprint),
+          );
+
+          if (outcome.status === "conflict") {
+            return {
+              status: "conflict",
+              reason: outcome.reason,
+              target: { kind: "settings" },
+            };
+          }
+
+          if (outcome.status === "saved") {
+            mutationIdsRef.current.forget(fingerprint);
+            settingsRef.current = outcome.value;
+            setSettings(outcome.value);
+          }
+        }
+
+        const mutations = diffMonthlySummaries(
+          monthlySummariesRef.current,
+          nextMonthlySummaries,
+        );
+        const run = await runMutations(
+          mutations,
+          async (mutation): Promise<MutationOutcome<MonthlySummary>> => {
+            if (mutation.kind !== "save") {
+              return { status: "deleted" };
+            }
+
+            const fingerprint = fingerprintOf(mutation);
+            const outcome = await saveMonthlySummaryRemote(
+              mutation.summary,
+              mutation.expectedUpdatedAt,
+              mutationIdsRef.current.idFor(fingerprint),
+            );
+
+            if (outcome.status !== "conflict") {
+              mutationIdsRef.current.forget(fingerprint);
+            }
+
+            return outcome;
+          },
+        );
+        let nextSummaries = monthlySummariesRef.current;
+
+        run.applied.forEach(({ mutation, outcome }) => {
+          if (outcome.status === "saved") {
+            nextSummaries = sortMonthlySummaries([
+              ...nextSummaries.filter(
+                (summary) => summary.monthKey !== mutation.key,
+              ),
+              outcome.value,
+            ]);
+          }
+        });
+
+        monthlySummariesRef.current = nextSummaries;
+        setMonthlySummaries(nextSummaries);
+
+        if (run.status === "conflict" && run.conflict) {
+          return {
+            status: "conflict",
+            reason: run.conflict.reason,
+            target: { kind: "month", monthKey: run.conflict.mutation.key },
+          };
+        }
+
+        if (run.status === "error") {
+          throw run.error;
+        }
+
+        return {
+          status: "saved",
+          settings: settingsRef.current,
+          monthlySummaries: monthlySummariesRef.current,
+        };
       } catch (error) {
         console.error("[Financial Goal] Failed to save configuration.", error);
-        setToastErrorMessage(
-          getErrorMessage(error, "Failed to save configuration."),
-        );
-        throw error;
+        return {
+          status: "error",
+          message: `${getErrorMessage(error, "Saving failed.")} Your changes are kept on this device.`,
+        };
+      } finally {
+        saveLockRef.current = false;
       }
     },
     [],
@@ -851,26 +1066,53 @@ export default function Home() {
 
   const handleDeleteSavedMonthSummary = useCallback(
     async (monthKey: string) => {
-      const nextMonthlySummaries = monthlySummaries.filter(
-        (summary) => summary.monthKey !== monthKey,
+      const savedSummary = monthlySummariesRef.current.find(
+        (summary) => summary.monthKey === monthKey,
       );
 
+      if (!savedSummary?.updatedAt) {
+        return;
+      }
+
+      if (saveLockRef.current) {
+        throw new Error("Another save is still running. Try again in a moment.");
+      }
+
+      saveLockRef.current = true;
+
       try {
-        await saveMonthlySummariesToSupabase(nextMonthlySummaries);
-        setMonthlySummaries(nextMonthlySummaries);
-      } catch (error) {
-        console.error(
-          "[Financial Goal] Failed to delete saved month summary.",
-          error,
+        const outcome = await deleteMonthlySummaryRemote(
+          monthKey,
+          savedSummary.updatedAt,
         );
-        setToastErrorMessage(
-          getErrorMessage(error, "Failed to delete saved month summary."),
+
+        if (outcome.status === "conflict") {
+          throw new Error(
+            "This month was changed on another device, so it wasn't deleted. Reload the app to see the latest version.",
+          );
+        }
+
+        const nextSummaries = monthlySummariesRef.current.filter(
+          (summary) => summary.monthKey !== monthKey,
         );
-        throw error;
+        monthlySummariesRef.current = nextSummaries;
+        setMonthlySummaries(nextSummaries);
+      } finally {
+        saveLockRef.current = false;
       }
     },
-    [monthlySummaries],
+    [],
   );
+
+  const handleReloadRemote = useCallback(async () => {
+    try {
+      return await refreshRemoteData();
+    } catch (error) {
+      showError(getErrorMessage(error, "Couldn't load the latest data."));
+      return null;
+    }
+  }, [refreshRemoteData, showError]);
+
   const handleSignIn = async (email: string, password: string) => {
     if (!hasSupabaseConfig()) {
       setToastErrorMessage(
@@ -896,6 +1138,16 @@ export default function Home() {
     } finally {
       setIsSigningIn(false);
     }
+  };
+
+  // Signing out clears this device's unsaved drafts, so ask first if there are any.
+  const requestSignOut = () => {
+    if (hasAnyUnsavedChanges) {
+      setIsSignOutConfirmOpen(true);
+      return;
+    }
+
+    void handleSignOut();
   };
 
   const handleSignOut = async () => {
@@ -937,10 +1189,11 @@ export default function Home() {
   } else if (currentScreen === "daily-log") {
     activeScreen = (
       <DailyLog
-        entries={reportDraftEntries ?? entries}
+        entries={reportEntries}
         fillMissingDayTargetDateKey={fillMissingDayTargetDateKey}
         fillMissingDaysRequest={fillMissingDaysRequest}
         hasUnsavedChanges={hasUnsavedReportChanges}
+        isSaving={isSavingReport}
         onDeleteSavedEntryImmediately={handleDeleteSavedEntryImmediately}
         onRemoveEntryForDate={handleRemoveEntryForDate}
         onRegisterNavigationHandlers={handleRegisterDailyLogNavigationHandlers}
@@ -968,7 +1221,8 @@ export default function Home() {
         }
         onSaveConfiguration={handleSaveConfiguration}
         onDeleteSavedMonthSummary={handleDeleteSavedMonthSummary}
-        onSignOut={() => void handleSignOut()}
+        onReloadRemote={handleReloadRemote}
+        onSignOut={requestSignOut}
         isSigningOut={isSigningOut}
         onUnsavedChangesChange={setHasUnsavedConfigurationChanges}
         settings={settings}
@@ -1035,9 +1289,43 @@ export default function Home() {
             variant="screen"
           >
             {!hasLoadedRemoteState ? (
-              <div className="rounded-[22px] border border-[#a8744a]/45 bg-[#18120e] p-5 text-sm text-[#b0947a]">
-                Loading your data…
-              </div>
+              loadErrorMessage ? (
+                <div className="space-y-4 rounded-[22px] border border-[#ff6b5b]/50 bg-[#240c09]/90 p-5">
+                  <div>
+                    <p className="dashboard-gold-title text-[17px] font-semibold">
+                      Couldn&apos;t load your data
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-[#ffd9d2]">
+                      {loadErrorMessage} Nothing was changed. Check your connection and try
+                      again.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      className="rounded-[13px] border border-[#fff1c4]/70 bg-[linear-gradient(180deg,#ffe9a8_0%,#f2b860_45%,#c27a3a_100%)] px-4 py-2.5 text-sm font-semibold text-[#1b0f05]"
+                      onClick={() => {
+                        setLoadErrorMessage("");
+                        setLoadAttempt((currentValue) => currentValue + 1);
+                      }}
+                      type="button"
+                    >
+                      Try again
+                    </button>
+                    <button
+                      className="rounded-[13px] border border-[#a97849]/60 bg-[#1a1410] px-4 py-2.5 text-sm font-semibold text-[#e8cfae]"
+                      disabled={isSigningOut}
+                      onClick={() => void handleSignOut()}
+                      type="button"
+                    >
+                      Sign out
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-[22px] border border-[#a8744a]/45 bg-[#18120e] p-5 text-sm text-[#b0947a]">
+                  Loading your data…
+                </div>
+              )
             ) : (
               activeScreen
             )}
@@ -1050,6 +1338,52 @@ export default function Home() {
         onDismiss={() => setToastErrorMessage("")}
         tone="error"
       />
+      <Toast
+        message={toastErrorMessage ? "" : toastSuccessMessage}
+        onDismiss={() => setToastSuccessMessage("")}
+        tone="success"
+      />
+      <WarningModal
+        body={
+          reportConflict
+            ? `${formatConflictDate(reportConflict.date)} ${
+                reportConflict.reason === "exists"
+                  ? "was also added on another device"
+                  : reportConflict.reason === "deleted"
+                    ? "was deleted on another device"
+                    : "was changed on another device"
+              } after you opened it, so your change wasn't saved.\n\nYour change is still here. Keep editing to leave it unsaved, use the other device's version, or overwrite it with yours. Overwriting replaces what the other device saved.`
+            : ""
+        }
+        extraActions={[
+          {
+            label: "Use other version",
+            onClick: () => void handleUseOtherReportVersion(),
+          },
+          {
+            label: "Overwrite with mine",
+            onClick: () => void handleOverwriteReportVersion(),
+            tone: "danger",
+          },
+        ]}
+        isOpen={reportConflict !== null}
+        onClose={() => setReportConflict(null)}
+        primaryActionLabel="Keep editing"
+        title="Changed on another device"
+      />
+      <WarningModal
+        body="You have unsaved changes on this device. Signing out discards them."
+        isOpen={isSignOutConfirmOpen}
+        onClose={() => setIsSignOutConfirmOpen(false)}
+        onPrimaryAction={() => {
+          setIsSignOutConfirmOpen(false);
+          void handleSignOut();
+        }}
+        onSecondaryAction={() => setIsSignOutConfirmOpen(false)}
+        primaryActionLabel="Sign out anyway"
+        secondaryActionLabel="Cancel"
+        title="Sign out with unsaved changes?"
+      />
       <WarningModal
         body="You have unsaved daily reports. Do you want to save them?"
         isOpen={isUnsavedReportModalOpen}
@@ -1057,17 +1391,17 @@ export default function Home() {
           setIsUnsavedReportModalOpen(false);
           setPendingScreen(null);
         }}
-        onPrimaryAction={() => {
+        onPrimaryAction={async () => {
           setIsUnsavedReportModalOpen(false);
-          const wasSavedImmediately =
-            hasUnsavedReportFieldDrafts && dailyLogNavigationHandlersRef.current
-              ? dailyLogNavigationHandlersRef.current.save()
-              : handleSaveReportEntries();
+          const wasSaved = dailyLogNavigationHandlersRef.current
+            ? await dailyLogNavigationHandlersRef.current.save()
+            : await handleSaveReportEntries();
 
-          if (wasSavedImmediately && pendingScreen) {
+          if (wasSaved && pendingScreen) {
             proceedToScreen(pendingScreen);
-            setPendingScreen(null);
           }
+
+          setPendingScreen(null);
         }}
         onSecondaryAction={() => {
           dailyLogNavigationHandlersRef.current?.discard();
@@ -1151,7 +1485,7 @@ export default function Home() {
           setPendingSummaryConflictSaveEntries(null);
           setPendingScreen(null);
         }}
-        onPrimaryAction={() => {
+        onPrimaryAction={async () => {
           const entriesToSave = pendingSummaryConflictSaveEntries;
           setIsSummaryConflictWarningOpen(false);
           setPendingSummaryConflictSaveEntries(null);
@@ -1160,12 +1494,13 @@ export default function Home() {
             return;
           }
 
-          const wasSavedImmediately = finishSavingReportEntries(entriesToSave);
+          const wasSaved = await saveReportAfterChecks(entriesToSave);
 
-          if (wasSavedImmediately && pendingScreen) {
+          if (wasSaved && pendingScreen) {
             proceedToScreen(pendingScreen);
-            setPendingScreen(null);
           }
+
+          setPendingScreen(null);
         }}
         onSecondaryAction={() => {
           setIsSummaryConflictWarningOpen(false);
@@ -1184,18 +1519,23 @@ export default function Home() {
           setPendingFutureSaveEntries(null);
           setPendingScreen(null);
         }}
-        onPrimaryAction={() => {
-          if (pendingFutureSaveEntries) {
-            commitReportEntries(pendingFutureSaveEntries);
-          }
-
+        onPrimaryAction={async () => {
+          const entriesToSave = pendingFutureSaveEntries;
           setIsFutureReportWarningOpen(false);
           setPendingFutureSaveEntries(null);
+          const wasSaved = entriesToSave
+            ? await persistReportEntriesList(entriesToSave)
+            : false;
 
-          if (pendingScreen) {
-            proceedToScreen(pendingScreen);
-            setPendingScreen(null);
+          if (wasSaved) {
+            finishReportSave();
           }
+
+          if (wasSaved && pendingScreen) {
+            proceedToScreen(pendingScreen);
+          }
+
+          setPendingScreen(null);
         }}
         onSecondaryAction={() => {
           setIsFutureReportWarningOpen(false);
@@ -1211,11 +1551,39 @@ export default function Home() {
 }
 
 function getErrorMessage(error: unknown, fallback: string) {
+  const rawMessage =
+    typeof error === "object" && error !== null
+      ? String((error as { message?: unknown }).message ?? "")
+      : "";
+
+  if (/failed to fetch|networkerror|load failed|network request failed/i.test(rawMessage)) {
+    return "Couldn't reach the server. Check your connection.";
+  }
+
   if (error instanceof Error && error.message) {
     return error.message;
   }
 
+  // Supabase errors are plain objects with a message.
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as { message?: unknown }).message === "string" &&
+    (error as { message: string }).message
+  ) {
+    return (error as { message: string }).message;
+  }
+
   return fallback;
+}
+
+function formatConflictDate(dateKey: string) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString("en-GB", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
 }
 
 function getSignInErrorMessage(error: unknown) {

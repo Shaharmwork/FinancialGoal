@@ -331,3 +331,6 @@ on public.profiles
 for delete
 to authenticated
 using (auth.uid() = id);
+
+-- Safe saving across devices (version-checked save functions): run
+-- supabase/migrations/20261028_safe_saving.sql after this file.

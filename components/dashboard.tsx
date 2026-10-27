@@ -2,17 +2,18 @@
 
 import { useEffect, useRef, useState } from "react";
 import Image, { type StaticImageData } from "next/image";
-import BriefcaseIcon from "@/src/assets/icons/BreifcaseIcon.png";
-import CalendarSaveIcon from "@/src/assets/icons/CalanderSave.png";
-import SandClockIcon from "@/src/assets/icons/SandClock.png";
-import CoinsBeforeTaxIcon from "@/src/assets/icons/CoinsBeforeTaxIcon.png";
-import ClockIcon from "@/src/assets/icons/ClockIcon.png";
-import CompassIcon from "@/src/assets/icons/Compass.png";
-import InvoiceIcon from "@/src/assets/icons/Invoice.png";
-import SliderButton from "@/src/assets/icons/SliderButton.png";
-import SliderFill from "@/src/assets/icons/SliderFill.png";
-import TaxReserveIcon from "@/src/assets/icons/TaxReserveIcon.png";
+import BriefcaseIcon from "@/src/assets/web/icons/BreifcaseIcon.png";
+import CalendarSaveIcon from "@/src/assets/web/icons/CalanderSave.png";
+import SandClockIcon from "@/src/assets/web/icons/SandClock.png";
+import CoinsBeforeTaxIcon from "@/src/assets/web/icons/CoinsBeforeTaxIcon.png";
+import ClockIcon from "@/src/assets/web/icons/ClockIcon.png";
+import CompassIcon from "@/src/assets/web/icons/Compass.png";
+import InvoiceIcon from "@/src/assets/web/icons/Invoice.png";
+import SliderButton from "@/src/assets/web/icons/SliderButton.png";
+import SliderFill from "@/src/assets/web/icons/SliderFill.png";
+import TaxReserveIcon from "@/src/assets/web/icons/TaxReserveIcon.png";
 import { PhoneStage, STAGE_WIDTH } from "@/components/phone-stage";
+import { isSupportedTaxYear, SUPPORTED_TAX_YEAR } from "@/lib/tax-engine";
 import type { DailyEntry, MonthlySummary, Screen, Settings } from "@/lib/types";
 import {
   getSetupCompleteness,
@@ -591,7 +592,11 @@ export function Dashboard({
       : reportsBanner
         ? reportsBanner
         : setupBanner;
-  const heroSupportSentence = getHeroSupportSentence({
+  const isTaxYearSupported = isSupportedTaxYear(now.getFullYear());
+  // Outside the supported year no tax-based figure is shown, rather than 2026 rules.
+  const heroSupportSentence = !isTaxYearSupported
+    ? `Tax rules for ${now.getFullYear()} aren't in the app yet, so no take-home estimate is shown.`
+    : getHeroSupportSentence({
     amountAhead,
     gapToGoal,
     monthsRemaining,
@@ -775,6 +780,7 @@ export function Dashboard({
 
           <YearlyPlanningCard
             beforeTaxTarget={beforeTaxTarget}
+            unsupportedTaxYear={isTaxYearSupported ? undefined : now.getFullYear()}
             goalProgress={goalProgress}
             hasBusinessHistory={hasBusinessHistory}
             monthReservedTax={month.reservedTaxFromPreviousMonths}
@@ -1548,6 +1554,7 @@ function DashboardBannerAnimationStyles() {
 
 function YearlyPlanningCard({
   beforeTaxTarget,
+  unsupportedTaxYear,
   goalProgress,
   hasBusinessHistory,
   monthReservedTax,
@@ -1561,7 +1568,8 @@ function YearlyPlanningCard({
   yearHours,
   yearlyNetGoal,
 }: {
-  beforeTaxTarget: number;
+  beforeTaxTarget: number | undefined;
+  unsupportedTaxYear: number | undefined;
   goalProgress: number | undefined;
   hasBusinessHistory: boolean;
   monthReservedTax: number | undefined;
@@ -1666,7 +1674,7 @@ function YearlyPlanningCard({
           >
             <ReferencePill
               label="Before-tax target"
-              value={formatCurrency(beforeTaxTarget)}
+              value={beforeTaxTarget === undefined ? "—" : formatCurrency(beforeTaxTarget)}
             />
           </div>
         </div>
@@ -1757,7 +1765,12 @@ function YearlyPlanningCard({
               className="absolute left-0 right-0 px-1"
               style={{ top: DASHBOARD_POS.tax.itemsY }}
             >
-              {hasBusinessHistory ? (
+              {unsupportedTaxYear !== undefined ? (
+                <p className="dashboard-gold-soft min-h-[40px] px-2 text-center text-[12px] leading-[1.35]">
+                  Tax estimates for {unsupportedTaxYear} aren&apos;t available yet.
+                  <br />The app only has the {SUPPORTED_TAX_YEAR} tax rules.
+                </p>
+              ) : hasBusinessHistory ? (
                 <div
                   className="grid grid-cols-2"
                   style={{ gap: DASHBOARD_POS.tax.gap }}
@@ -1773,7 +1786,7 @@ function YearlyPlanningCard({
                     <TaxSupportItem
                       icon={TaxReserveIcon}
                       id="taxReserved"
-                      label={`Tax saved by 1 ${shortMonth}`}
+                      label={`Reserve target by 1 ${shortMonth}`}
                       value={
                         monthReservedTax === undefined
                           ? "—"
@@ -1792,7 +1805,7 @@ function YearlyPlanningCard({
                     <TaxSupportItem
                       icon={CalendarSaveIcon}
                       id="taxToSave"
-                      label={`Tax to add by ${lastDayOfMonth} ${shortMonth} · so far`}
+                      label={`Add to reserve by ${lastDayOfMonth} ${shortMonth} · so far`}
                       value={
                         taxToSaveThisMonth === undefined
                           ? "—"
