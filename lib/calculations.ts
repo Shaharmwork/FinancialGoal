@@ -72,6 +72,25 @@ function isWeekday(date: Date) {
   return day !== 0 && day !== 6
 }
 
+const publicHolidayKeysByYear = new Map<number, Set<string>>()
+
+function isPublicHoliday(date: Date) {
+  const year = date.getFullYear()
+  let holidayKeys = publicHolidayKeysByYear.get(year)
+
+  if (!holidayKeys) {
+    holidayKeys = new Set(getDutchPublicHolidayWeekdays(year).map(toDateKey))
+    publicHolidayKeysByYear.set(year, holidayKeys)
+  }
+
+  return holidayKeys.has(toDateKey(date))
+}
+
+// A day that should have a report: a weekday that isn't a Dutch public holiday.
+function isExpectedWorkday(date: Date) {
+  return isWeekday(date) && !isPublicHoliday(date)
+}
+
 function getHandledDateKeys(entries: DailyEntry[], extraHandledDateKeys: Iterable<string> = []) {
   const handledDateKeys = new Set(entries.map((entry) => entry.date))
 
@@ -124,6 +143,10 @@ function getVacationDaysPerYear(settings: Settings) {
 
 function getSelfEmployedDeductionFlag(settings: Settings) {
   return settings.qualifiesForSelfEmployedDeduction ?? false
+}
+
+function getStartersDeductionFlag(settings: Settings) {
+  return settings.qualifiesForStartersDeduction ?? false
 }
 
 function hasValidBaseConfiguration(settings: Settings) {
@@ -226,6 +249,12 @@ export function getMissingReportDateKeys(
   const currentMonthKey = toMonthKey(today)
   const todayKey = toDateKey(today)
   const summaryMonthKeys = getSummaryMonthKeys(monthlySummaries, currentYear)
+  // Employment months never take daily reports, so they're covered even while ongoing.
+  const employmentMonthKeys = new Set(
+    monthlySummaries
+      .filter((summary) => summary.monthType === 'employment')
+      .map((summary) => summary.monthKey),
+  )
   const handledDateKeys = getHandledDateKeys(entries, extraHandledDateKeys)
   const cursor = new Date(currentYear, 0, 1)
   const missingDateKeys: string[] = []
@@ -233,12 +262,13 @@ export function getMissingReportDateKeys(
   while (toDateKey(cursor) < todayKey) {
     const dateKey = toDateKey(cursor)
     const monthKey = dateKey.slice(0, 7)
-    const isPreviousMonthCoveredBySummary =
-      monthKey < currentMonthKey && summaryMonthKeys.has(monthKey)
+    const isMonthCoveredBySummary =
+      (monthKey < currentMonthKey && summaryMonthKeys.has(monthKey)) ||
+      employmentMonthKeys.has(monthKey)
 
     if (
-      !isPreviousMonthCoveredBySummary &&
-      isWeekday(cursor) &&
+      !isMonthCoveredBySummary &&
+      isExpectedWorkday(cursor) &&
       !handledDateKeys.has(dateKey)
     ) {
       missingDateKeys.push(dateKey)
@@ -336,15 +366,24 @@ export function isCurrentMonthIncomplete(entries: DailyEntry[], today = new Date
 export function getEarliestMissingCurrentMonthWeekday(
   entries: DailyEntry[],
   today = new Date(),
+  monthlySummaries: MonthlySummary[] = [],
 ) {
   const { start } = getCurrentMonthRange(today)
   const todayKey = toDateKey(today)
+  const isEmploymentMonth = monthlySummaries.some(
+    (summary) => summary.monthType === 'employment' && summary.monthKey === toMonthKey(today),
+  )
+
+  if (isEmploymentMonth) {
+    return undefined
+  }
+
   const entryDays = new Set(entries.map((entry) => entry.date))
   const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate())
 
   while (toDateKey(cursor) < todayKey) {
     const dateKey = toDateKey(cursor)
-    if (isWeekday(cursor) && !entryDays.has(dateKey)) {
+    if (isExpectedWorkday(cursor) && !entryDays.has(dateKey)) {
       return dateKey
     }
     cursor.setDate(cursor.getDate() + 1)
@@ -372,7 +411,7 @@ export function filterEntriesByRange(entries: DailyEntry[], start: Date, end: Da
   return entries.filter((entry) => entry.date >= startKey && entry.date <= endKey)
 }
 
-type EntryField = 'hours' | 'invoicedIncome' | 'paidIncome' | 'expenses'
+type EntryField = 'hours' | 'invoicedIncome' | 'expenses'
 
 function sumEntries(entries: DailyEntry[], field: EntryField) {
   return entries.reduce((total, entry) => {
@@ -497,6 +536,7 @@ export function getPlanningConsistency(settings: Settings, today = new Date()) {
     annualBusinessIncome: projectedAnnualBeforeTax,
     annualBusinessExpenses: 0,
     qualifiesForSelfEmployedDeduction: getSelfEmployedDeductionFlag(settings),
+    qualifiesForStartersDeduction: getStartersDeductionFlag(settings),
   })
   const targetAnnualNet = targetNetMonth * 12
   const projectedAnnualNet = taxEstimate.projectedAnnualNet
@@ -528,18 +568,11 @@ function projectFromPace(actualValue: number, progress: number) {
   return undefined
 }
 
-function projectFromPaceOrZero(actualValue: number, progress: number) {
-  if (progress <= 0) {
-    return 0
-  }
-
-  return actualValue > 0 ? actualValue / progress : 0
-}
-
 function getRequiredAnnualBeforeTaxAmount(settings: Settings) {
   return estimateRequiredAnnualBusinessProfitForTargetNet2026({
     targetAnnualNet: getTargetNetMonth(settings) * 12,
     qualifiesForSelfEmployedDeduction: getSelfEmployedDeductionFlag(settings),
+    qualifiesForStartersDeduction: getStartersDeductionFlag(settings),
   })
 }
 
@@ -554,7 +587,6 @@ function getRemainingTaxReserveTarget(remainingTaxToSave: number, settings: Sett
 interface BusinessTotals {
   hours: number
   invoicedIncome: number
-  paidIncome: number
   expenses: number
   profit: number
 }
@@ -563,7 +595,6 @@ function createEmptyBusinessTotals(): BusinessTotals {
   return {
     hours: 0,
     invoicedIncome: 0,
-    paidIncome: 0,
     expenses: 0,
     profit: 0,
   }
@@ -572,18 +603,15 @@ function createEmptyBusinessTotals(): BusinessTotals {
 function toBusinessTotals(input: {
   hours?: number | null
   invoicedIncome?: number | null
-  paidIncome?: number | null
   expenses?: number | null
 }): BusinessTotals {
   const hours = input.hours ?? 0
   const invoicedIncome = input.invoicedIncome ?? 0
-  const paidIncome = input.paidIncome ?? 0
   const expenses = input.expenses ?? 0
 
   return {
     hours,
     invoicedIncome,
-    paidIncome,
     expenses,
     profit: invoicedIncome - expenses,
   }
@@ -593,18 +621,12 @@ function combineBusinessTotals(left: BusinessTotals, right: BusinessTotals) {
   return toBusinessTotals({
     hours: left.hours + right.hours,
     invoicedIncome: left.invoicedIncome + right.invoicedIncome,
-    paidIncome: left.paidIncome + right.paidIncome,
     expenses: left.expenses + right.expenses,
   })
 }
 
 function hasBusinessData(totals: BusinessTotals) {
-  return (
-    totals.hours > 0 ||
-    totals.invoicedIncome > 0 ||
-    totals.paidIncome > 0 ||
-    totals.expenses > 0
-  )
+  return totals.hours > 0 || totals.invoicedIncome > 0 || totals.expenses > 0
 }
 
 interface EmploymentTotals {
@@ -692,7 +714,6 @@ function getMonthTotalsForEntryList(entries: DailyEntry[]) {
   return toBusinessTotals({
     hours: sumEntries(entries, 'hours'),
     invoicedIncome: sumEntries(entries, 'invoicedIncome'),
-    paidIncome: sumEntries(entries, 'paidIncome'),
     expenses: sumEntries(entries, 'expenses'),
   })
 }
@@ -765,17 +786,56 @@ function getYearlyIncomeTotalsForMonths(
   }, createEmptyYearlyIncomeTotals())
 }
 
+interface BusinessMonthSpan {
+  businessMonthsElapsed: number
+  businessMonthsInYear: number
+}
+
+// Employment months have no business income, so the business pace and the share of
+// the yearly reserve that is due so far only count business months. With no
+// employment months this is simply elapsedMonths out of 12.
+function getBusinessMonthSpan(
+  monthlySummaries: MonthlySummary[],
+  year: number,
+  elapsedMonths: number,
+): BusinessMonthSpan {
+  const employmentMonthIndexes = monthlySummaries
+    .filter(
+      (summary) =>
+        summary.monthType === 'employment' && summary.monthKey.startsWith(`${year}-`),
+    )
+    .map((summary) => Number(summary.monthKey.slice(5, 7)) - 1)
+  const elapsedEmploymentMonths = employmentMonthIndexes.reduce((total, monthIndex) => {
+    return total + Math.min(1, Math.max(0, elapsedMonths - monthIndex))
+  }, 0)
+
+  return {
+    businessMonthsElapsed: Math.max(0, elapsedMonths - elapsedEmploymentMonths),
+    businessMonthsInYear: Math.max(0, 12 - employmentMonthIndexes.length),
+  }
+}
+
+function getBusinessShareOfYear(span: BusinessMonthSpan) {
+  if (span.businessMonthsInYear <= 0) {
+    return 0
+  }
+
+  return Math.min(1, span.businessMonthsElapsed / span.businessMonthsInYear)
+}
+
 function getAnnualReserveModel(
   totals: YearlyIncomeTotals,
-  yearProgress: number,
+  span: BusinessMonthSpan,
   settings: Settings,
 ) {
-  if (!hasYearlyIncomeData(totals) || yearProgress <= 0) {
+  if (!hasYearlyIncomeData(totals)) {
     return undefined
   }
 
-  const annualBusinessIncome = projectFromPaceOrZero(totals.business.invoicedIncome, yearProgress)
-  const annualBusinessExpenses = projectFromPaceOrZero(totals.business.expenses, yearProgress)
+  const businessProjectionFactor =
+    span.businessMonthsElapsed > 0 ? span.businessMonthsInYear / span.businessMonthsElapsed : 0
+  const annualBusinessIncome = Math.max(0, totals.business.invoicedIncome) * businessProjectionFactor
+  const annualBusinessExpenses = Math.max(0, totals.business.expenses) * businessProjectionFactor
   const annualEmploymentGrossSalary = totals.employment.grossSalary
   const annualTaxAlreadyWithheld = totals.employment.taxAlreadyWithheld
   const annualTaxEstimate = estimateAnnualTaxFor2026({
@@ -784,6 +844,7 @@ function getAnnualReserveModel(
     annualEmploymentGrossSalary,
     annualTaxAlreadyWithheld,
     qualifiesForSelfEmployedDeduction: getSelfEmployedDeductionFlag(settings),
+    qualifiesForStartersDeduction: getStartersDeductionFlag(settings),
   })
 
   return {
@@ -821,10 +882,8 @@ export interface WeekStats {
 export interface MonthStats {
   hours: number
   invoicedIncome: number
-  paidIncome: number
   expenses: number
   profit: number
-  cashOutstanding: number
   reservedTaxFromPreviousMonths?: number
   forecastCalculatedTaxToSaveThisMonth?: number
 }
@@ -832,8 +891,8 @@ export interface MonthStats {
 export interface YearStats {
   requiredAnnualBeforeTaxAmount: number
   goalAnnualNet: number
+  ytdHours: number
   ytdInvoicedIncome: number
-  ytdPaidIncome: number
   ytdExpenses: number
   ytdProfit: number
   ytdEmploymentGrossSalary: number
@@ -880,18 +939,24 @@ export function getCurrentYearStats(
   today = new Date(),
 ): YearStats {
   const currentMonthEnd = getCurrentMonthRange(today).end
-  const elapsedYearMonths = Math.max(getElapsedYearMonths(today, currentMonthEnd), 1 / 12)
-  const yearProgress = Math.min(1, elapsedYearMonths / 12)
+  const elapsedYearMonths = Math.min(
+    12,
+    Math.max(getElapsedYearMonths(today, currentMonthEnd), 1 / 12),
+  )
   const monthKeys = getMonthKeysUntilCurrentMonth(today)
   const yearToDateTotals = getYearlyIncomeTotalsForMonths(entries, monthlySummaries, monthKeys)
   const hasYearData = hasYearlyIncomeData(yearToDateTotals)
-  const annualReserveModel = getAnnualReserveModel(yearToDateTotals, yearProgress, settings)
+  const annualReserveModel = getAnnualReserveModel(
+    yearToDateTotals,
+    getBusinessMonthSpan(monthlySummaries, today.getFullYear(), elapsedYearMonths),
+    settings,
+  )
 
   return {
     requiredAnnualBeforeTaxAmount: getRequiredAnnualBeforeTaxAmount(settings),
     goalAnnualNet: roundCurrency(getTargetNetMonth(settings) * 12),
+    ytdHours: roundHours(yearToDateTotals.business.hours),
     ytdInvoicedIncome: roundCurrency(yearToDateTotals.business.invoicedIncome),
-    ytdPaidIncome: roundCurrency(yearToDateTotals.business.paidIncome),
     ytdExpenses: roundCurrency(yearToDateTotals.business.expenses),
     ytdProfit: roundCurrency(yearToDateTotals.business.profit),
     ytdEmploymentGrossSalary: roundCurrency(yearToDateTotals.employment.grossSalary),
@@ -939,9 +1004,10 @@ export function getCurrentMonthStats(
   today = new Date(),
 ): MonthStats {
   const currentMonthTotals = getMonthTotals(entries, monthlySummaries, toMonthKey(today))
+  const year = today.getFullYear()
   const completedPreviousMonths = today.getMonth()
-  const previousMonthFraction = completedPreviousMonths / 12
-  const currentMonthFraction = (completedPreviousMonths + 1) / 12
+  const elapsedYearMonths = getElapsedYearMonths(today, getCurrentMonthRange(today).end)
+  const previousMonthsSpan = getBusinessMonthSpan(monthlySummaries, year, completedPreviousMonths)
   const previousMonthKeys = getPreviousMonthKeys(today)
   const previousMonthsTotals = getYearlyIncomeTotalsForMonths(
     entries,
@@ -950,40 +1016,42 @@ export function getCurrentMonthStats(
   )
   const previousMonthsReserveModel = getAnnualReserveModel(
     previousMonthsTotals,
-    previousMonthFraction,
+    previousMonthsSpan,
     settings,
   )
   const reservedTaxFromPreviousMonths =
     previousMonthsReserveModel === undefined
       ? 0
-      : previousMonthsReserveModel.remainingTaxReserveTarget * previousMonthFraction
-  const monthEndTotals = combineYearlyIncomeTotals(previousMonthsTotals, {
+      : previousMonthsReserveModel.remainingTaxReserveTarget *
+        getBusinessShareOfYear(previousMonthsSpan)
+  const yearToDateTotals = combineYearlyIncomeTotals(previousMonthsTotals, {
     business: currentMonthTotals,
     employment: getEmploymentTotalsFromSummary(monthlySummaries, toMonthKey(today)),
   })
-  const monthEndReserveModel = getAnnualReserveModel(
-    monthEndTotals,
-    currentMonthFraction,
+  // This month is still in progress, so project the year from the time that has actually
+  // passed; only the reserve share is taken at the end of this month.
+  const yearToDateReserveModel = getAnnualReserveModel(
+    yearToDateTotals,
+    getBusinessMonthSpan(monthlySummaries, year, elapsedYearMonths),
     settings,
   )
+  const monthEndBusinessShare = getBusinessShareOfYear(
+    getBusinessMonthSpan(monthlySummaries, year, completedPreviousMonths + 1),
+  )
   const forecastCalculatedTaxToSaveThisMonth =
-    monthEndReserveModel === undefined
+    yearToDateReserveModel === undefined
       ? 0
       : Math.max(
           0,
-          monthEndReserveModel.remainingTaxReserveTarget * currentMonthFraction -
+          yearToDateReserveModel.remainingTaxReserveTarget * monthEndBusinessShare -
             reservedTaxFromPreviousMonths,
         )
 
   return {
     hours: roundHours(currentMonthTotals.hours),
     invoicedIncome: roundCurrency(currentMonthTotals.invoicedIncome),
-    paidIncome: roundCurrency(currentMonthTotals.paidIncome),
     expenses: roundCurrency(currentMonthTotals.expenses),
     profit: roundCurrency(currentMonthTotals.profit),
-    cashOutstanding: roundCurrency(
-      Math.max(0, currentMonthTotals.invoicedIncome - currentMonthTotals.paidIncome),
-    ),
     reservedTaxFromPreviousMonths: roundCurrency(reservedTaxFromPreviousMonths),
     forecastCalculatedTaxToSaveThisMonth: roundCurrency(
       forecastCalculatedTaxToSaveThisMonth,

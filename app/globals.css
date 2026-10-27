@@ -1,14 +1,15 @@
 @import 'tailwindcss';
 
+/* Dark bronze theme shared by every screen, matching the dashboard artwork. */
 :root {
-  --background: oklch(0.97 0.01 85);
-  --foreground: oklch(0.28 0.03 35);
-  --card: oklch(0.99 0.005 85);
-  --border: oklch(0.9 0.015 75);
-  --muted: oklch(0.94 0.012 80);
-  --muted-foreground: oklch(0.52 0.03 40);
-  --primary: oklch(0.61 0.11 40);
-  --primary-foreground: oklch(0.99 0.01 85);
+  --background: #0b0806;
+  --foreground: #f3e4cf;
+  --card: #18120e;
+  --border: rgba(168, 116, 74, 0.45);
+  --muted: #221912;
+  --muted-foreground: #b0947a;
+  --primary: #e0a25a;
+  --primary-foreground: #1b0f05;
 }
 
 @theme inline {
@@ -34,15 +35,17 @@
 
   html {
     min-height: 100%;
+    background: var(--background);
+    color-scheme: dark;
   }
 
   body {
     @apply bg-background text-foreground antialiased;
     background-image:
-      radial-gradient(circle at top left, rgba(255, 216, 107, 0.32), transparent 30%),
-      radial-gradient(circle at top right, rgba(136, 201, 255, 0.24), transparent 26%),
-      radial-gradient(circle at bottom right, rgba(201, 188, 255, 0.18), transparent 28%),
-      linear-gradient(180deg, rgba(255, 252, 245, 0.96), rgba(247, 242, 232, 1));
+      radial-gradient(circle at 50% -10%, rgba(214, 150, 92, 0.16), transparent 42%),
+      radial-gradient(circle at 100% 30%, rgba(120, 72, 40, 0.12), transparent 34%),
+      linear-gradient(180deg, #120d0a 0%, #0b0806 60%, #070504 100%);
+    background-attachment: fixed;
     min-height: 100vh;
   }
 
@@ -57,6 +60,104 @@
   }
 
   ::selection {
-    background: color-mix(in oklab, var(--primary) 30%, white);
+    background: rgba(224, 162, 90, 0.35);
+  }
+}
+
+/* Gold metallic text, used on the dashboard and across the app. */
+@layer components {
+  .dashboard-gold-label {
+    background: linear-gradient(180deg, #fff3df 0%, #e5c6a3 48%, #b9845f 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 1px 1px rgba(18, 10, 5, 0.76))
+      drop-shadow(0 0 4px rgba(205, 142, 88, 0.16));
+  }
+
+  .dashboard-gold-soft {
+    background: linear-gradient(180deg, #f9dfbc 0%, #c99770 58%, #9e6848 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 1px 1px rgba(15, 8, 4, 0.78));
+  }
+
+  .dashboard-gold-title {
+    background: linear-gradient(180deg, #fff8ec 0%, #ead0ad 48%, #bd8a63 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    line-height: 1.08;
+    filter: drop-shadow(0 2px 2px rgba(17, 9, 4, 0.82))
+      drop-shadow(0 0 7px rgba(210, 152, 95, 0.2));
+  }
+
+  .dashboard-gold-value {
+    background: linear-gradient(180deg, #f7d7a8 0%, #d69a61 42%, #aa6f43 72%, #7a4629 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 2px 2px rgba(18, 9, 4, 0.82))
+      drop-shadow(0 0 8px rgba(190, 126, 70, 0.24));
+  }
+
+  .dashboard-gold-hero-value {
+    background: linear-gradient(180deg, #fff1ca 0%, #e9bf7f 30%, #c3824a 64%, #7f492a 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: 0;
+    filter: drop-shadow(0 4px 4px rgba(18, 9, 4, 0.88))
+      drop-shadow(0 0 14px rgba(205, 139, 75, 0.3));
+  }
+
+  .dashboard-nav-active-text {
+    background: linear-gradient(180deg, #fff4df 0%, #d4a77a 62%, #704329 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 1px 1px rgba(255, 242, 207, 0.28));
+  }
+
+  .dashboard-status-good {
+    color: #aaf0be;
+    text-shadow:
+      0 1px 1px rgba(5, 18, 8, 0.72),
+      0 0 8px rgba(93, 231, 132, 0.24);
+  }
+
+  .dashboard-status-waiting {
+    color: #fff2a8;
+    text-shadow:
+      0 1px 1px rgba(32, 23, 4, 0.72),
+      0 0 8px rgba(255, 230, 91, 0.26);
+  }
+
+  .dashboard-status-set-goal {
+    color: #ff5b4f;
+    text-shadow:
+      0 1px 1px rgba(35, 3, 2, 0.72),
+      0 0 8px rgba(255, 50, 37, 0.3);
+  }
+
+  .dashboard-status-close {
+    color: #67f2dc;
+    text-shadow:
+      0 1px 1px rgba(3, 24, 22, 0.72),
+      0 0 8px rgba(68, 234, 211, 0.28);
+  }
+
+  .dashboard-status-behind {
+    color: #ffae4f;
+    text-shadow:
+      0 1px 1px rgba(35, 14, 2, 0.72),
+      0 0 8px rgba(255, 134, 37, 0.28);
   }
 }

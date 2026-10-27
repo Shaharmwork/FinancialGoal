@@ -6,25 +6,52 @@ import {
   useMemo,
   useRef,
   useState,
-  type FocusEvent,
   type FormEvent,
-  type MouseEvent,
-  type RefObject,
 } from "react";
-import { InfoHelp } from "@/components/info-help";
 import { WarningModal } from "@/components/warning-modal";
-import { defaultSettings } from "@/lib/default-state";
 import {
+  cx,
+  FieldLabel,
+  GhostButton,
+  GoldButton,
+  IconButton,
+  inputClassName,
+  Notice,
+  NumberField,
+  Panel,
+  SaveBar,
+  ScreenHeader,
+  Segmented,
+  TextButton,
+  Toast,
+} from "@/components/ui/kit";
+import CalendarSaveIcon from "@/src/assets/icons/CalanderSave.png";
+import CompassIcon from "@/src/assets/icons/Compass.png";
+import InvoiceIcon from "@/src/assets/icons/Invoice.png";
+import TaxReserveIcon from "@/src/assets/icons/TaxReserveIcon.png";
+import {
+  getCurrentYearStats,
   getDutchPublicHolidayWeekdays,
   getPlanningConsistency,
 } from "@/lib/calculations";
-import { formatCurrency, formatHours } from "@/lib/formatters";
+import {
+  formatCurrency,
+  formatCurrencyPrecise,
+  formatHours,
+  formatHoursPrecise,
+  formatNumber,
+} from "@/lib/formatters";
 import {
   clearUserConfigurationDraft,
   getUserConfigurationDraft,
   updateUserConfigurationDraft,
 } from "@/lib/ui-preferences";
-import type { DailyEntry, MonthlySummary, Settings } from "@/lib/types";
+import type {
+  DailyEntry,
+  MonthlySummary,
+  MonthWorkLine,
+  Settings,
+} from "@/lib/types";
 
 export interface ConfigurationNavigationHandlers {
   discard: () => void;
@@ -46,42 +73,21 @@ interface ConfigurationProps {
     handlers: ConfigurationNavigationHandlers | null,
   ) => void;
   onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void;
+  onSignOut: () => void;
+  isSigningOut?: boolean;
   userId?: string;
-}
-
-interface FieldProps {
-  helpTitle?: string;
-  infoBody?: string;
-  inputRef?: RefObject<HTMLInputElement | null>;
-  invalid?: boolean;
-  label: string;
-  value: number | null;
-  onChange: (value: number | null) => void;
-  step?: number;
-  prefix?: string;
-  suffix?: string;
-  help?: string;
-  disabled?: boolean;
-  placeholder?: string;
-  onSetDefault?: () => void;
-}
-
-interface ToggleFieldProps {
-  helpTitle?: string;
-  infoBody?: string;
-  yesButtonRef?: RefObject<HTMLButtonElement | null>;
-  invalid?: boolean;
-  label: string;
-  checked: boolean | null;
-  onChange: (checked: boolean) => void;
-  help?: string;
-  disabled?: boolean;
-  onSetDefault?: () => void;
 }
 
 interface MonthSummaryValidationIssue {
   message: string;
   title: string;
+}
+
+interface PendingRemoveWorkLine {
+  lineIndex: number;
+  summaryIndex: number;
+  workLine: MonthWorkLine;
+  monthKey: string;
 }
 
 interface PendingDeleteMonthSummary {
@@ -92,8 +98,7 @@ interface PendingDeleteMonthSummary {
 
 type SummaryFieldKey =
   | "monthKey"
-  | "hours"
-  | "invoicedIncome"
+  | "workLines"
   | "grossSalary"
   | "netSalaryReceived"
   | "taxAlreadyWithheld";
@@ -117,24 +122,17 @@ interface SummaryConsistencyValidationIssue extends MonthSummaryValidationIssue 
   rowKey: string;
 }
 
-const BUSINESS_MONTH_VAT_EXPLANATION =
-  "months, To keep your take-home projection and yearly tax estimate accurate, enter income and expenses excluding VAT.";
 const BEFORE_TAX_AMOUNT_EXPLANATION =
-  "Invoiced amount (excl. VAT) minus Business expenses (excl. VAT) gives that month's before-tax amount.";
-const MONTH_TOTALS_PURPOSE_EXPLANATION =
-  "Use this section to add older business or employment / pre-business months and avoid the need to add each working day manually. These month totals help the app calculate your yearly pace, target progress, and tax planning more accurately.";
-const BUSINESS_MONTH_TOTALS_USAGE_EXPLANATION =
-  "If a month already has daily entries, those entries remain the source of truth for calculations.";
+  "The work lines' income (excl. VAT) minus business expenses (excl. VAT) gives that month's before-tax amount.";
+const WORK_LINES_EXPLANATION =
+  "Add one line per rate you worked at that month, e.g. one for your main client and one for handyman jobs. A line's income is hours × hourly rate. For a fixed-price job, fill in the total instead and the app shows the hourly rate it works out to.";
 const TAX_ALREADY_WITHHELD_EXPLANATION =
   "This is the tax already deducted by your employer for that month. You can usually find it on your payslip under wage tax, payroll tax, or a similar tax deduction line.";
+// Hours rule (urencriterium) for the self-employed and starters' deductions.
+const HOURS_RULE = 1225;
 const CONFIG_SCREEN_INTENT_KEY = "configuration-screen-intent";
 const CONFIG_SCREEN_FOCUS_TARGET_KEY = "configuration-screen-focus-target";
 const CONFIG_SCREEN_TARGET_MONTH_KEY = "configuration-screen-target-month";
-
-function parseNumber(value: string) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
 
 function parseOptionalNumber(value: string) {
   if (value.trim() === "") {
@@ -143,22 +141,6 @@ function parseOptionalNumber(value: string) {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function selectPrefilledZero(input: HTMLInputElement) {
-  const normalizedValue = input.value.trim();
-
-  if (normalizedValue === "0" || normalizedValue === "0.00") {
-    input.select();
-  }
-}
-
-function selectPrefilledZeroOnFocus(event: FocusEvent<HTMLInputElement>) {
-  selectPrefilledZero(event.currentTarget);
-}
-
-function selectPrefilledZeroOnClick(event: MouseEvent<HTMLInputElement>) {
-  selectPrefilledZero(event.currentTarget);
 }
 
 function sortMonthlySummariesNewestFirst(summaries: MonthlySummary[]) {
@@ -293,6 +275,118 @@ function getMissingBaseConfigurationFields(settings: Settings) {
   };
 }
 
+function roundCents(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function createEmptyWorkLine(settings: Settings): MonthWorkLine {
+  const defaultShiftIncome = settings.defaultShiftIncome ?? 0;
+  const defaultShiftHours = settings.defaultShiftHours ?? 0;
+
+  return {
+    label: "",
+    hours: null,
+    hourlyRate:
+      defaultShiftIncome > 0 && defaultShiftHours > 0
+        ? roundCents(defaultShiftIncome / defaultShiftHours)
+        : null,
+    totalIncome: null,
+  };
+}
+
+// A prefilled rate alone doesn't make a line count; it needs hours, a total or a label.
+function isWorkLineBlank(workLine: MonthWorkLine) {
+  return (
+    workLine.label.trim() === "" &&
+    !((workLine.hours ?? 0) > 0) &&
+    !((workLine.totalIncome ?? 0) > 0)
+  );
+}
+
+function getWorkLineIncome(workLine: MonthWorkLine) {
+  if ((workLine.totalIncome ?? 0) > 0) {
+    return workLine.totalIncome ?? 0;
+  }
+
+  const hours = workLine.hours ?? 0;
+  const hourlyRate = workLine.hourlyRate ?? 0;
+  return hours > 0 && hourlyRate > 0 ? hours * hourlyRate : 0;
+}
+
+// Months saved before work lines existed only have month totals, so they are shown
+// as one line: as an hourly rate if hours x rate gives the total to the cent,
+// otherwise as a fixed total.
+function getSummaryWorkLines(summary: MonthlySummary): MonthWorkLine[] {
+  if (summary.workLines && summary.workLines.length > 0) {
+    return summary.workLines;
+  }
+
+  const hours = summary.hours ?? 0;
+  const income = summary.invoicedIncome ?? 0;
+
+  if (hours <= 0 && income <= 0) {
+    return [];
+  }
+
+  const derivedHourlyRate = hours > 0 ? roundCents(income / hours) : 0;
+  const canShowAsHourlyRate =
+    derivedHourlyRate > 0 &&
+    roundCents(derivedHourlyRate * hours) === roundCents(income);
+
+  return [
+    {
+      label: "",
+      hours: hours > 0 ? hours : null,
+      hourlyRate: canShowAsHourlyRate ? derivedHourlyRate : null,
+      totalIncome: !canShowAsHourlyRate && income > 0 ? income : null,
+    },
+  ];
+}
+
+function getWorkLineTotals(workLines: MonthWorkLine[]) {
+  return workLines.reduce(
+    (totals, workLine) => {
+      if (isWorkLineBlank(workLine)) {
+        return totals;
+      }
+
+      return {
+        hours: totals.hours + (workLine.hours ?? 0),
+        income: totals.income + getWorkLineIncome(workLine),
+      };
+    },
+    { hours: 0, income: 0 },
+  );
+}
+
+function formatMonthKey(monthKey: string) {
+  const [year, month] = monthKey.split("-").map(Number);
+
+  if (!year || !month) {
+    return "this month";
+  }
+
+  return new Date(year, month - 1, 1).toLocaleDateString("en-GB", {
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function getRemoveWorkLineMessage(workLine: MonthWorkLine, monthKey: string) {
+  const lineName = workLine.label.trim()
+    ? `the "${workLine.label.trim()}" line`
+    : "this line";
+  const income = getWorkLineIncome(workLine);
+  const details = [
+    (workLine.hours ?? 0) > 0 ? formatHours(workLine.hours ?? 0) : null,
+    income > 0 ? formatCurrencyPrecise(income) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return `This removes ${lineName}${details ? ` (${details})` : ""} from ${formatMonthKey(monthKey)}. The month's hours and income go down by that amount when you save, which changes your yearly pace and tax estimate.`;
+}
+
 function getSummaryRowKey(summary: MonthlySummary, index: number) {
   return `${summary.monthKey || "draft"}-${index}`;
 }
@@ -332,30 +426,27 @@ function getInvalidSummaryFields(
     return invalidFields;
   }
 
-  const hours = summary.hours ?? 0;
-  const invoicedIncome = summary.invoicedIncome ?? 0;
-  const paidIncome = summary.paidIncome ?? 0;
+  const workLines = getSummaryWorkLines(summary).filter(
+    (workLine) => !isWorkLineBlank(workLine),
+  );
   const expenses = summary.expenses ?? 0;
-  const hasAnyValue =
-    hours > 0 || invoicedIncome > 0 || paidIncome > 0 || expenses > 0;
 
-  if (!hasAnyValue) {
-    invalidFields.hours = true;
-    invalidFields.invoicedIncome = true;
+  // Expense-only months are allowed; otherwise every line needs hours and income.
+  if (workLines.length === 0) {
+    if (!(expenses > 0)) {
+      invalidFields.workLines = true;
+    }
+
     return invalidFields;
   }
 
-  const isExpenseOnlySummary =
-    expenses > 0 && hours <= 0 && invoicedIncome <= 0 && paidIncome <= 0;
-
-  if (!isExpenseOnlySummary) {
-    if (!(hours > 0)) {
-      invalidFields.hours = true;
-    }
-
-    if (!(invoicedIncome > 0)) {
-      invalidFields.invoicedIncome = true;
-    }
+  if (
+    workLines.some(
+      (workLine) =>
+        !((workLine.hours ?? 0) > 0) || !(getWorkLineIncome(workLine) > 0),
+    )
+  ) {
+    invalidFields.workLines = true;
   }
 
   return invalidFields;
@@ -435,12 +526,23 @@ function sanitizeMonthlySummaryForSave(
       ...summary,
       expenses: null,
       invoicedIncome: null,
-      paidIncome: null,
+      workLines: undefined,
     };
   }
 
+  const workLines = getSummaryWorkLines(summary)
+    .filter((workLine) => !isWorkLineBlank(workLine))
+    .map((workLine) => ({
+      ...workLine,
+      label: workLine.label.trim(),
+    }));
+  const totals = getWorkLineTotals(workLines);
+
   return {
     ...summary,
+    hours: roundCents(totals.hours),
+    invoicedIncome: roundCents(totals.income),
+    workLines: workLines.length > 0 ? workLines : undefined,
     grossSalary: null,
     netSalaryReceived: null,
     taxAlreadyWithheld: null,
@@ -473,7 +575,7 @@ function getConfigurationValidationIssue({
   return {
     title: "Complete month summary fields",
     message:
-      "Some month summaries still need required fields. Business month summaries need hours worked and invoiced amount (excl. VAT), unless they are expense-only. Employment / pre-business months need gross salary, net salary received, and tax already withheld.",
+      "Some month summaries still need required fields. Business month summaries need at least one work line with hours and an hourly rate or total, unless they are expense-only. Employment / pre-business months need gross salary, net salary received, and tax already withheld.",
   };
 }
 
@@ -492,152 +594,6 @@ function isIncompleteNewSummary(
   return isIncompleteDraftSummary(summary);
 }
 
-function SettingField({
-  helpTitle,
-  infoBody,
-  inputRef,
-  invalid = false,
-  label,
-  value,
-  onChange,
-  step = 1,
-  prefix,
-  suffix,
-  help,
-  disabled = false,
-  placeholder,
-  onSetDefault,
-}: FieldProps) {
-  return (
-    <label className="block">
-      <span className="mb-2 flex items-center justify-between gap-3">
-        <span className="flex items-center gap-2 text-sm font-medium text-foreground">
-          <span>{label}</span>
-          {helpTitle && infoBody ? (
-            <InfoHelp body={infoBody} title={helpTitle} />
-          ) : null}
-        </span>
-        {onSetDefault ? (
-          <button
-            className="shrink-0 text-xs font-medium text-muted-foreground transition hover:text-foreground"
-            disabled={disabled}
-            onClick={onSetDefault}
-            type="button"
-          >
-            Use default
-          </button>
-        ) : null}
-      </span>
-      <div className="relative">
-        {prefix ? (
-          <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
-            {prefix}
-          </span>
-        ) : null}
-        <input
-          ref={inputRef}
-          className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
-            invalid
-              ? "border-rose-300 bg-rose-50/50 focus:border-rose-500"
-              : "border-border focus:border-primary"
-          } ${prefix ? "pl-8" : ""} ${suffix ? "pr-8" : ""}`}
-          disabled={disabled}
-          placeholder={placeholder}
-          type="number"
-          step={step}
-          value={value ?? ""}
-          onChange={(event) =>
-            onChange(parseOptionalNumber(event.target.value))
-          }
-        />
-        {suffix ? (
-          <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
-            {suffix}
-          </span>
-        ) : null}
-      </div>
-      {help ? (
-        <span className="mt-2 block text-xs text-muted-foreground">{help}</span>
-      ) : null}
-    </label>
-  );
-}
-
-function ToggleField({
-  helpTitle,
-  infoBody,
-  yesButtonRef,
-  invalid = false,
-  label,
-  checked,
-  onChange,
-  help,
-  disabled = false,
-  onSetDefault,
-}: ToggleFieldProps) {
-  return (
-    <label className="block">
-      <span className="mb-2 flex items-center justify-between gap-3">
-        <span className="flex items-center gap-2 text-sm font-medium text-foreground">
-          <span>{label}</span>
-          {helpTitle && infoBody ? (
-            <InfoHelp body={infoBody} title={helpTitle} />
-          ) : null}
-        </span>
-        {onSetDefault ? (
-          <button
-            className="shrink-0 text-xs font-medium text-muted-foreground transition hover:text-foreground"
-            disabled={disabled}
-            onClick={onSetDefault}
-            type="button"
-          >
-            Use default
-          </button>
-        ) : null}
-      </span>
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          ref={yesButtonRef}
-          aria-pressed={checked === true}
-          className={`rounded-2xl border px-4 py-3 text-left text-base transition disabled:cursor-not-allowed disabled:opacity-60 ${
-            checked === true
-              ? "bg-primary text-primary-foreground"
-              : "bg-background text-foreground"
-          } ${invalid && checked !== true ? "border-rose-300 bg-rose-50/50" : "border-border"}`}
-          disabled={disabled}
-          onClick={() => onChange(true)}
-          type="button"
-        >
-          <span className="block font-medium">Yes</span>
-          <span className="mt-1 block text-sm opacity-80">Eligible</span>
-        </button>
-        <button
-          aria-pressed={checked === false}
-          className={`rounded-2xl border px-4 py-3 text-left text-base transition disabled:cursor-not-allowed disabled:opacity-60 ${
-            checked === false
-              ? "bg-primary text-primary-foreground"
-              : "bg-background text-foreground"
-          } ${invalid && checked !== false ? "border-rose-300 bg-rose-50/50" : "border-border"}`}
-          disabled={disabled}
-          onClick={() => onChange(false)}
-          type="button"
-        >
-          <span className="block font-medium">No</span>
-          <span className="mt-1 block text-sm opacity-80">Not eligible</span>
-        </button>
-      </div>
-      {checked === null ? (
-        <span className="mt-2 block text-xs text-muted-foreground">
-          Choose yes or no to finish setup.
-        </span>
-      ) : null}
-      {help ? (
-        <span className="mt-2 block text-xs text-muted-foreground">{help}</span>
-      ) : null}
-    </label>
-  );
-}
-
 export function Configuration({
   backfillFocusRequest = 0,
   entries,
@@ -648,6 +604,8 @@ export function Configuration({
   onDeleteSavedMonthSummary,
   onRegisterNavigationHandlers,
   onUnsavedChangesChange,
+  onSignOut,
+  isSigningOut = false,
   userId,
 }: ConfigurationProps) {
   const [draftSettings, setDraftSettings] = useState(settings);
@@ -667,6 +625,13 @@ export function Configuration({
     useState<InvalidSummaryFieldsState>({});
   const [pendingDeleteMonthSummary, setPendingDeleteMonthSummary] =
     useState<PendingDeleteMonthSummary | null>(null);
+  const [pendingRemoveWorkLine, setPendingRemoveWorkLine] =
+    useState<PendingRemoveWorkLine | null>(null);
+  const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
+  // Saved months start collapsed; new or invalid months are always open.
+  const [expandedMonthKeys, setExpandedMonthKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
   const settingsSectionRef = useRef<HTMLElement | null>(null);
   const firstSettingsInputRef = useRef<HTMLInputElement | null>(null);
   const backfillSectionRef = useRef<HTMLElement | null>(null);
@@ -831,8 +796,22 @@ export function Configuration({
       block: "center",
     });
     focusTarget.focus();
+    const focusedMonthKey = pendingMonthFocusRowKey.slice(
+      0,
+      pendingMonthFocusRowKey.lastIndexOf("-"),
+    );
+    setExpandedMonthKeys((currentValue) => new Set(currentValue).add(focusedMonthKey));
     setPendingMonthFocusRowKey(null);
   }, [pendingMonthFocusRowKey, sortedDraftSummaries]);
+
+  useEffect(() => {
+    if (!formMessage || isErrorMessage) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => setFormMessage(""), 3500);
+    return () => window.clearTimeout(timeoutId);
+  }, [formMessage, isErrorMessage]);
 
   const resetFormMessage = () => {
     if (!formMessage && !isErrorMessage) {
@@ -983,6 +962,92 @@ export function Configuration({
     refreshInvalidSummaryFieldsIfVisible(nextSortedSummaries);
   };
 
+  // Month hours and income always follow the work lines, so calculations keep
+  // reading the same month totals as before.
+  const updateSummaryWorkLines = (
+    index: number,
+    getNextWorkLines: (workLines: MonthWorkLine[]) => MonthWorkLine[],
+  ) => {
+    resetFormMessage();
+
+    const next = sortedDraftSummaries.map((summary, summaryIndex) => {
+      if (summaryIndex !== index) {
+        return summary;
+      }
+
+      const workLines = getNextWorkLines(getSummaryWorkLines(summary));
+      const totals = getWorkLineTotals(workLines);
+
+      return {
+        ...summary,
+        hours: roundCents(totals.hours),
+        invoicedIncome: roundCents(totals.income),
+        workLines,
+      };
+    });
+
+    const nextSortedSummaries = sortMonthlySummariesNewestFirst(next);
+    setDraftMonthlySummaries(nextSortedSummaries);
+    refreshInvalidSummaryFieldsIfVisible(nextSortedSummaries);
+  };
+
+  const updateWorkLineField = <Key extends keyof MonthWorkLine>(
+    summaryIndex: number,
+    lineIndex: number,
+    key: Key,
+    value: MonthWorkLine[Key],
+  ) => {
+    updateSummaryWorkLines(summaryIndex, (workLines) =>
+      workLines.map((workLine, index) =>
+        index === lineIndex ? { ...workLine, [key]: value } : workLine,
+      ),
+    );
+  };
+
+  const addWorkLine = (summaryIndex: number) => {
+    updateSummaryWorkLines(summaryIndex, (workLines) => [
+      ...workLines,
+      createEmptyWorkLine(draftSettings),
+    ]);
+  };
+
+  const removeWorkLine = (summaryIndex: number, lineIndex: number) => {
+    updateSummaryWorkLines(summaryIndex, (workLines) =>
+      workLines.filter((_, index) => index !== lineIndex),
+    );
+  };
+
+  // Lines with values change the month's income, so ask first; empty lines go right away.
+  const requestRemoveWorkLine = (
+    summaryIndex: number,
+    lineIndex: number,
+    workLine: MonthWorkLine,
+  ) => {
+    if (isWorkLineBlank(workLine)) {
+      removeWorkLine(summaryIndex, lineIndex);
+      return;
+    }
+
+    setPendingRemoveWorkLine({
+      lineIndex,
+      monthKey: sortedDraftSummaries[summaryIndex]?.monthKey ?? "",
+      summaryIndex,
+      workLine,
+    });
+  };
+
+  const confirmRemoveWorkLine = () => {
+    if (!pendingRemoveWorkLine) {
+      return;
+    }
+
+    removeWorkLine(
+      pendingRemoveWorkLine.summaryIndex,
+      pendingRemoveWorkLine.lineIndex,
+    );
+    setPendingRemoveWorkLine(null);
+  };
+
   const addMonthSummary = useCallback((targetMonthKey?: string) => {
     resetFormMessage();
     const normalizedTargetMonthKey =
@@ -1053,7 +1118,7 @@ export function Configuration({
       monthKey: nextMonthKey,
       monthType: "business",
       invoicedIncome: 0,
-      paidIncome: 0,
+      workLines: [createEmptyWorkLine(draftSettings)],
       expenses: 0,
       hours: 0,
       grossSalary: null,
@@ -1074,6 +1139,7 @@ export function Configuration({
     refreshInvalidSummaryFieldsIfVisible(nextSummaries);
     setPendingMonthFocusRowKey(nextFocusRowKey);
   }, [
+    draftSettings,
     entryMonthKeys,
     getMonthValidationIssue,
     refreshInvalidSummaryFieldsIfVisible,
@@ -1370,7 +1436,7 @@ export function Configuration({
       if (userId) {
         clearUserConfigurationDraft(userId);
       }
-      setFormMessage("Saved.");
+      setFormMessage("Changes saved.");
       return true;
     } catch (error) {
       setIsErrorMessage(true);
@@ -1427,6 +1493,34 @@ export function Configuration({
     await saveConfigurationDraft();
   };
 
+  const configuredHourlyRate =
+    (draftSettings.defaultShiftIncome ?? 0) > 0 && (draftSettings.defaultShiftHours ?? 0) > 0
+      ? (draftSettings.defaultShiftIncome ?? 0) / (draftSettings.defaultShiftHours ?? 1)
+      : 0;
+  const yearHours = getCurrentYearStats(entries, monthlySummaries, draftSettings).ytdHours;
+  const hoursRuleProgress = Math.min(100, (yearHours / HOURS_RULE) * 100);
+  const isToastError = isErrorMessage && warningModalIssue === null;
+
+  const isMonthExpanded = (summary: MonthlySummary, rowKey: string, isInvalid: boolean) =>
+    isInvalid ||
+    !savedMonthKeys.has(summary.monthKey) ||
+    expandedMonthKeys.has(summary.monthKey) ||
+    pendingMonthFocusRowKey === rowKey;
+
+  const toggleMonthExpanded = (monthKey: string) => {
+    setExpandedMonthKeys((currentValue) => {
+      const nextValue = new Set(currentValue);
+
+      if (nextValue.has(monthKey)) {
+        nextValue.delete(monthKey);
+      } else {
+        nextValue.add(monthKey);
+      }
+
+      return nextValue;
+    });
+  };
+
   return (
     <>
       <WarningModal
@@ -1437,587 +1531,665 @@ export function Configuration({
         title={warningModalIssue?.title ?? ""}
       />
       <WarningModal
-        body="This will remove historical data used in your dashboard calculations. You can add it again later, but your current forecasts and tax planning may change."
+        body="This removes the month from your history right away. Your forecasts and tax planning will change. You can add it again later."
         isOpen={pendingDeleteMonthSummary !== null}
         onClose={() => setPendingDeleteMonthSummary(null)}
         onPrimaryAction={confirmRemoveSavedMonthSummary}
         onSecondaryAction={() => setPendingDeleteMonthSummary(null)}
         primaryActionLabel="Delete month"
         secondaryActionLabel="Cancel"
-        title="Delete saved month summary?"
+        title={
+          pendingDeleteMonthSummary
+            ? `Delete ${formatMonthKey(pendingDeleteMonthSummary.monthKey)}?`
+            : "Delete month?"
+        }
+      />
+      <WarningModal
+        body={
+          pendingRemoveWorkLine
+            ? getRemoveWorkLineMessage(
+                pendingRemoveWorkLine.workLine,
+                pendingRemoveWorkLine.monthKey,
+              )
+            : ""
+        }
+        isOpen={pendingRemoveWorkLine !== null}
+        onClose={() => setPendingRemoveWorkLine(null)}
+        onPrimaryAction={confirmRemoveWorkLine}
+        onSecondaryAction={() => setPendingRemoveWorkLine(null)}
+        primaryActionLabel="Remove line"
+        secondaryActionLabel="Cancel"
+        title="Remove this work line?"
+      />
+      <WarningModal
+        body="All configuration changes you haven't saved yet will be lost."
+        isOpen={isDiscardConfirmOpen}
+        onClose={() => setIsDiscardConfirmOpen(false)}
+        onPrimaryAction={() => {
+          discardConfigurationDraft();
+          setIsDiscardConfirmOpen(false);
+        }}
+        onSecondaryAction={() => setIsDiscardConfirmOpen(false)}
+        primaryActionLabel="Discard changes"
+        secondaryActionLabel="Keep editing"
+        title="Discard unsaved changes?"
+      />
+      <Toast
+        message={formMessage && (isToastError || !isErrorMessage) ? formMessage : ""}
+        onDismiss={resetFormMessage}
+        tone={isErrorMessage ? "error" : "success"}
       />
 
-      <form className="space-y-4 pb-8" onSubmit={handleSubmit}>
-        <section
-          ref={settingsSectionRef}
-          className="rounded-[1.8rem] border border-border bg-card p-5 shadow-sm"
+      <form className="space-y-4" onSubmit={handleSubmit}>
+        <ScreenHeader
+          eyebrow="Configuration"
+          title="Your plan"
+          subtitle="Goals, rates, tax and past months."
+          action={
+            <GhostButton disabled={isSigningOut} onClick={onSignOut} size="sm">
+              {isSigningOut ? "Signing out…" : "Sign out"}
+            </GhostButton>
+          }
+        />
+
+        <Panel
+          icon={CompassIcon}
+          panelRef={settingsSectionRef}
+          subtitle="What you want to take home, and how much you plan to work."
+          title="Income goal"
         >
-          <h2 className="text-lg font-semibold text-foreground">
-            Configuration
-          </h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Fill the required fields to unlock accurate planning.
-          </p>
-          <div className="mt-4 grid gap-4">
-            <SettingField
-              helpTitle="Target net month"
-              infoBody="Your monthly take-home goal. The dashboard uses this to work backward into the before-tax target you need for yearly pace and target tracking."
+          <div className="space-y-4">
+            <NumberField
+              disabled={isSaving}
+              info={{
+                title: "Take-home goal",
+                body: "Your monthly take-home goal after tax. The dashboard works backward from it to the before-tax amount you need.",
+              }}
               inputRef={firstSettingsInputRef}
               invalid={invalidSettingFields.targetNetMonth === true}
-              label="Target Net Month"
-              disabled={isSaving}
-              onSetDefault={() =>
-                updateField("targetNetMonth", defaultSettings.targetNetMonth)
-              }
-              placeholder="0"
-              value={draftSettings.targetNetMonth}
+              label="Take-home per month"
               onChange={(value) => updateField("targetNetMonth", value)}
+              placeholder="0"
               prefix="€"
+              step={50}
+              value={draftSettings.targetNetMonth}
             />
-            <SettingField
-              helpTitle="Weekly hours target"
-              infoBody="Your preferred work hours for a normal week. The dashboard compares logged hours against this target in the weekly planning card."
-              inputRef={weeklyHoursTargetRef}
-              invalid={invalidSettingFields.weeklyHoursTarget === true}
-              label="Hours I Want To Work Every Week"
-              disabled={isSaving}
-              onSetDefault={() =>
-                updateField(
-                  "weeklyHoursTarget",
-                  defaultSettings.weeklyHoursTarget,
-                )
-              }
-              placeholder="0"
-              value={draftSettings.weeklyHoursTarget}
-              onChange={(value) => updateField("weeklyHoursTarget", value)}
-              step={0.25}
-            />
-            <SettingField
-              helpTitle="Default shift income"
-              infoBody="This is the expected invoice amount for one standard configured shift. It is based on your default shift hours and default shift income, used as a suggested value when you log an entry, and you can override it per entry when needed."
-              inputRef={defaultShiftIncomeRef}
-              invalid={invalidSettingFields.defaultShiftIncome === true}
-              label="Default Invoice Amount"
-              disabled={isSaving}
-              onSetDefault={() =>
-                updateField(
-                  "defaultShiftIncome",
-                  defaultSettings.defaultShiftIncome,
-                )
-              }
-              placeholder="0"
-              value={draftSettings.defaultShiftIncome}
-              onChange={(value) => updateField("defaultShiftIncome", value)}
-              prefix="€"
-              step={0.01}
-            />
-            <SettingField
-              inputRef={defaultShiftHoursRef}
-              invalid={invalidSettingFields.defaultShiftHours === true}
-              label="Default Shift Hours"
-              disabled={isSaving}
-              onSetDefault={() =>
-                updateField(
-                  "defaultShiftHours",
-                  defaultSettings.defaultShiftHours,
-                )
-              }
-              placeholder="0"
-              value={draftSettings.defaultShiftHours}
-              onChange={(value) => updateField("defaultShiftHours", value)}
-              step={0.25}
-            />
-            <SettingField
-              helpTitle="Vacation days per year"
-              infoBody="Vacation days reduce the realistic work hours capacity used in the planning helper. This is only a planning assumption, not a separate tax rule."
-              inputRef={vacationDaysPerYearRef}
-              invalid={invalidSettingFields.vacationDaysPerYear === true}
-              label="Vacation days per year"
-              disabled={isSaving}
-              onSetDefault={() =>
-                updateField("vacationDaysPerYear", dutchPublicHolidayWeekdays)
-              }
-              placeholder="0"
-              value={draftSettings.vacationDaysPerYear}
-              onChange={(value) => updateField("vacationDaysPerYear", value)}
-              help={`NL ${new Date().getFullYear()} baseline: ${dutchPublicHolidayWeekdays} weekday public holidays. You may use that as your default, or adjust to your own plans.`}
-            />
-            <SettingField
-              helpTitle="Spouse monthly income"
-              infoBody="This is for a later combined household view on the dashboard. It does not change your own business tax calculation and is only for shared visibility."
-              label="Spouse Monthly Income"
-              disabled={isSaving}
-              placeholder="0"
-              value={draftSettings.spouseMonthlyIncome}
-              onChange={(value) => updateField("spouseMonthlyIncome", value)}
-              prefix="€"
-            />
-            <SettingField
-              helpTitle="Reserve buffer percent"
-              infoBody="This adds extra breathing room on top of the calculated tax estimate. The dashboard uses it to raise reserve targets so you can save a bit more safely."
-              inputRef={reserveBufferPercentRef}
-              invalid={invalidSettingFields.reserveBufferPercent === true}
-              label="Reserve Buffer Percentage"
-              disabled={isSaving}
-              onSetDefault={() =>
-                updateField(
-                  "reserveBufferPercent",
-                  defaultSettings.reserveBufferPercent,
-                )
-              }
-              placeholder="0"
-              value={draftSettings.reserveBufferPercent}
-              onChange={(value) => updateField("reserveBufferPercent", value)}
-              suffix="%"
-              step={0.5}
-            />
-            <ToggleField
-              helpTitle="Self-employed deduction"
-              infoBody="This tells the tax calculation whether to include the self-employed deduction. The easiest practical check is your yearly hours: add all worked hours from this year's daily entries and any monthly backfill summaries. If that total is around 1,225 hours or more, you usually pass the main hours test. That is roughly 102 hours a month on average, or about 24 hours a week across the year."
-              yesButtonRef={selfEmployedDeductionYesRef}
-              invalid={
-                invalidSettingFields.qualifiesForSelfEmployedDeduction === true
-              }
-              label="Qualifies For Self-Employed Deduction"
-              checked={draftSettings.qualifiesForSelfEmployedDeduction}
-              disabled={isSaving}
-              onChange={(value) =>
-                updateField("qualifiesForSelfEmployedDeduction", value)
-              }
-              help="Affects the tax estimate used across the dashboard."
-            />
+            <div className="grid grid-cols-2 gap-3">
+              <NumberField
+                disabled={isSaving}
+                info={{
+                  title: "Weekly hours",
+                  body: "Your planned work hours in a normal week. The dashboard compares your logged hours with it.",
+                }}
+                inputRef={weeklyHoursTargetRef}
+                invalid={invalidSettingFields.weeklyHoursTarget === true}
+                label="Hours / week"
+                onChange={(value) => updateField("weeklyHoursTarget", value)}
+                placeholder="0"
+                step={0.5}
+                suffix="h"
+                value={draftSettings.weeklyHoursTarget}
+              />
+              <NumberField
+                disabled={isSaving}
+                info={{
+                  title: "Vacation days",
+                  body: `Days off you plan this year. They lower the hours you can realistically work in the planning check. NL ${new Date().getFullYear()} has ${dutchPublicHolidayWeekdays} public holidays on weekdays.`,
+                }}
+                inputRef={vacationDaysPerYearRef}
+                invalid={invalidSettingFields.vacationDaysPerYear === true}
+                label="Vacation days"
+                onChange={(value) => updateField("vacationDaysPerYear", value)}
+                placeholder="0"
+                step={1}
+                value={draftSettings.vacationDaysPerYear}
+              />
+            </div>
+
             {planningConsistency ? (
-              <div className="rounded-[1.35rem] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-950">
-                <p className="font-semibold">Planning check</p>
-                <p className="mt-2">
-                  Your goal is{" "}
-                  <span className="font-semibold">
-                    {formatCurrency(draftSettings.targetNetMonth ?? 0)}
-                  </span>
-                  /mo, or{" "}
-                  <span className="font-semibold">
-                    {formatCurrency(planningConsistency.targetAnnualNet)}
-                  </span>
-                  /yr after tax.
-                </p>
-                <p className="mt-2">
-                  Your current hours/rate setup points to about{" "}
-                  <span className="font-semibold">
-                    {formatCurrency(planningConsistency.projectedAnnualNet)}
-                  </span>
-                  /yr after estimated tax.
-                </p>
-                <p className="mt-2 text-xs text-rose-900/80">
-                  So keep in mind that it is{" "}
-                  <span className="font-semibold">
-                    {formatCurrency(Math.abs(planningConsistency.difference))}
-                  </span>{" "}
-                  {planningConsistency.difference < 0 ? "below" : "above"} your
-                  yearly net goal, based on{" "}
-                  <span className="font-semibold">
-                    {formatHours(planningConsistency.plannedYearlyHours)}
-                  </span>{" "}
-                  planned hours/yr and{" "}
-                  <span className="font-semibold">
-                    {plannedVacationDaysPerYear}
-                  </span>{" "}
-                  vacation days.
-                </p>
-              </div>
+              <Notice
+                title={
+                  planningConsistency.difference < 0
+                    ? `Your plan: ${formatCurrency(Math.abs(planningConsistency.difference))} short of your goal`
+                    : `Your plan: ${formatCurrency(planningConsistency.difference)} above your goal`
+                }
+                tone={planningConsistency.difference < 0 ? "warn" : "info"}
+              >
+                Working {formatHours(planningConsistency.plannedYearlyHours)} this year (
+                {plannedVacationDaysPerYear} vacation days) at your default rate gives about{" "}
+                {formatCurrency(planningConsistency.projectedAnnualNet)} after tax, against a goal of{" "}
+                {formatCurrency(planningConsistency.targetAnnualNet)}.
+              </Notice>
             ) : null}
           </div>
-        </section>
+        </Panel>
 
-        <section
-          ref={backfillSectionRef}
-          className="rounded-[1.8rem] border border-border bg-card p-5 shadow-sm"
+        <Panel
+          icon={InvoiceIcon}
+          subtitle="Used as the default when you report a day or add a month."
+          title="Default rate"
         >
-          <div className="flex items-center justify-between gap-3">
+          <div className="grid grid-cols-2 gap-3">
+            <NumberField
+              disabled={isSaving}
+              info={{
+                title: "Shift income",
+                body: "What you invoice for one standard shift, excluding VAT. Together with the shift hours it sets your default hourly rate.",
+              }}
+              inputRef={defaultShiftIncomeRef}
+              invalid={invalidSettingFields.defaultShiftIncome === true}
+              label="Per shift"
+              onChange={(value) => updateField("defaultShiftIncome", value)}
+              placeholder="0"
+              prefix="€"
+              step={0.01}
+              value={draftSettings.defaultShiftIncome}
+            />
+            <NumberField
+              disabled={isSaving}
+              inputRef={defaultShiftHoursRef}
+              invalid={invalidSettingFields.defaultShiftHours === true}
+              label="Shift length"
+              onChange={(value) => updateField("defaultShiftHours", value)}
+              placeholder="0"
+              step={0.25}
+              suffix="h"
+              value={draftSettings.defaultShiftHours}
+            />
+          </div>
+          <p className="mt-3 text-sm text-[#a88c71]">
+            {configuredHourlyRate > 0 ? (
+              <>
+                Default rate:{" "}
+                <span className="dashboard-gold-value font-semibold">
+                  {formatCurrencyPrecise(configuredHourlyRate)} per hour
+                </span>
+              </>
+            ) : (
+              "Fill in both to get a default hourly rate."
+            )}
+          </p>
+        </Panel>
+
+        <Panel
+          icon={TaxReserveIcon}
+          subtitle="How the tax estimate and your reserve are calculated."
+          title="Tax"
+        >
+          <div className="space-y-5">
+            <NumberField
+              disabled={isSaving}
+              help="Extra margin on top of the estimated tax, so you set aside a little more."
+              inputRef={reserveBufferPercentRef}
+              invalid={invalidSettingFields.reserveBufferPercent === true}
+              label="Reserve buffer"
+              onChange={(value) => updateField("reserveBufferPercent", value)}
+              placeholder="0"
+              step={0.5}
+              suffix="%"
+              value={draftSettings.reserveBufferPercent}
+            />
+
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-semibold text-foreground">
-                  Backfill month totals
-                </h2>
-                <InfoHelp
-                  body={
-                    <>
-                      <p>{MONTH_TOTALS_PURPOSE_EXPLANATION}</p>
-                      <p className="font-semibold text-rose-700 underline">
-                        Note!
-                      </p>
-                      <p>
-                        * If a month already has{" "}
-                        <span className="font-semibold">daily entries</span>,
-                        those entries remain the source of truth for
-                        calculations.
-                      </p>
-                      <p>
-                        * For <span className="font-semibold">Business</span>{" "}
-                        {BUSINESS_MONTH_VAT_EXPLANATION}
-                      </p>
-                    </>
+              <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
+                <span className="font-semibold uppercase tracking-[0.12em] text-[#c9a57f]">
+                  Hours this year
+                </span>
+                <span
+                  className={
+                    yearHours >= HOURS_RULE ? "font-semibold text-[#aaf0be]" : "font-semibold text-[#ffcf6e]"
                   }
-                  title="Backfill Month totals"
+                >
+                  {formatHours(yearHours)} of {formatNumber(HOURS_RULE)}h
+                  {yearHours >= HOURS_RULE ? " ✓" : ""}
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-[#0f0b08] ring-1 ring-[#8a603d]/40">
+                <div
+                  className="h-full rounded-full bg-[linear-gradient(90deg,#c27a3a,#f2b860,#ffe9a8)]"
+                  style={{ width: `${hoursRuleProgress}%` }}
                 />
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Add older months to improve yearly progress and tax accuracy.
+              <p className="mt-1.5 text-xs leading-5 text-[#a88c71]">
+                Both deductions need the 1,225-hours rule: all hours spent on the business,
+                including unbilled work like admin and finding clients. This counts your logged
+                hours only.
               </p>
             </div>
-            <button
-              ref={addMonthButtonRef}
-              className="rounded-full bg-muted px-3 py-2 text-sm font-medium text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+
+            <div>
+              <FieldLabel
+                info={{
+                  title: "Self-employed deduction",
+                  body: "A €1,200 deduction (zelfstandigenaftrek) for entrepreneurs who meet the 1,225-hours rule in the year.",
+                }}
+              >
+                Self-employed deduction
+              </FieldLabel>
+              <Segmented<"yes" | "no">
+                disabled={isSaving}
+                firstButtonRef={selfEmployedDeductionYesRef}
+                invalid={invalidSettingFields.qualifiesForSelfEmployedDeduction === true}
+                label="Self-employed deduction"
+                onChange={(value) => updateField("qualifiesForSelfEmployedDeduction", value === "yes")}
+                options={[
+                  { value: "yes", label: "I qualify" },
+                  { value: "no", label: "I don't" },
+                ]}
+                value={
+                  draftSettings.qualifiesForSelfEmployedDeduction === null
+                    ? null
+                    : draftSettings.qualifiesForSelfEmployedDeduction
+                      ? "yes"
+                      : "no"
+                }
+              />
+            </div>
+
+            <div>
+              <FieldLabel
+                info={{
+                  title: "Starters' deduction",
+                  body: "An extra €2,123 (startersaftrek) on top of the self-employed deduction. You usually qualify if you meet the 1,225-hours rule this year, you weren't self-employed in at least one of the previous 5 years, and you claimed the self-employed deduction no more than twice in those 5 years. It can be used up to 3 times.",
+                }}
+              >
+                Starters&apos; deduction
+              </FieldLabel>
+              <Segmented<"yes" | "no">
+                disabled={isSaving || draftSettings.qualifiesForSelfEmployedDeduction !== true}
+                label="Starters' deduction"
+                onChange={(value) => updateField("qualifiesForStartersDeduction", value === "yes")}
+                options={[
+                  { value: "yes", label: "I qualify" },
+                  { value: "no", label: "I don't" },
+                ]}
+                value={draftSettings.qualifiesForStartersDeduction ? "yes" : "no"}
+              />
+              {draftSettings.qualifiesForSelfEmployedDeduction !== true ? (
+                <p className="mt-1.5 text-xs text-[#a88c71]">
+                  Only applies when you qualify for the self-employed deduction.
+                </p>
+              ) : null}
+            </div>
+          </div>
+        </Panel>
+
+        <Panel
+          icon={CalendarSaveIcon}
+          panelRef={backfillSectionRef}
+          subtitle="Whole months you didn't report day by day."
+          title="Past months"
+          titleAction={
+            <GoldButton
+              buttonRef={addMonthButtonRef}
               disabled={isSaving}
               onClick={() => addMonthSummary()}
-              type="button"
+              size="sm"
             >
-              Add month
-            </button>
-          </div>
+              + Month
+            </GoldButton>
+          }
+        >
+          {sortedDraftSummaries.length === 0 ? (
+            <p className="py-3 text-center text-sm text-[#a88c71]">
+              No month totals yet. Add months you worked before you started reporting daily.
+            </p>
+          ) : (
+            <div className="space-y-2.5">
+              {sortedDraftSummaries.map((summary, index) => {
+                const rowKey = getSummaryRowKey(summary, index);
+                const rowInvalidFields = invalidSummaryFields[rowKey] ?? {};
+                const isInvalidSummaryRow = Object.keys(rowInvalidFields).length > 0;
+                const isExpanded = isMonthExpanded(summary, rowKey, isInvalidSummaryRow);
+                const isEmployment = summary.monthType === "employment";
+                const summaryWorkLines = getSummaryWorkLines(summary);
+                const summaryWorkLineTotals = getWorkLineTotals(summaryWorkLines);
+                const isSavedMonth = savedMonthKeys.has(summary.monthKey);
 
-          <div className="mt-4 space-y-4">
-            {sortedDraftSummaries.map((summary, index) => {
-              const rowKey = getSummaryRowKey(summary, index);
-              const rowInvalidFields = invalidSummaryFields[rowKey] ?? {};
-              const isInvalidSummaryRow =
-                Object.keys(rowInvalidFields).length > 0;
-
-              return (
-                <div
-                  key={`${summary.monthKey}-${index}`}
-                  ref={(node) => {
-                    monthCardRefs.current[rowKey] = node;
-                  }}
-                  className={`rounded-[1.5rem] p-4 ${
-                    isInvalidSummaryRow
-                      ? "border border-rose-300 bg-rose-50/70"
-                      : "bg-muted/55"
-                  }`}
-                >
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <label className="block">
-                      <span className="mb-2 block text-sm font-medium text-foreground">
-                        Month
-                      </span>
-                      <input
-                        ref={(node) => {
-                          monthInputRefs.current[rowKey] = node;
-                        }}
-                        className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                          rowInvalidFields.monthKey
-                            ? "border-rose-300 bg-rose-50/50 focus:border-rose-500"
-                            : "border-border focus:border-primary"
-                        }`}
-                        disabled={isSaving}
-                        type="month"
-                        value={summary.monthKey}
-                        onChange={(event) =>
-                          updateSummaryField(
-                            index,
-                            "monthKey",
-                            event.target.value,
-                          )
-                        }
-                      />
-                    </label>
-
-                    <div className="block">
-                      <span className="mb-2 block text-sm font-medium text-foreground">
-                        Month type
-                      </span>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          aria-pressed={summary.monthType === "business"}
-                          className={`rounded-2xl border px-4 py-3 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                            summary.monthType === "business"
-                              ? "border-primary bg-primary text-primary-foreground"
-                              : "border-border bg-background text-foreground"
-                          }`}
-                          disabled={isSaving}
-                          onClick={() =>
-                            updateSummaryMonthType(index, "business")
-                          }
-                          type="button"
-                        >
-                          Business
-                        </button>
-                        <button
-                          aria-pressed={summary.monthType === "employment"}
-                          className={`rounded-2xl border px-4 py-3 text-left text-sm transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                            summary.monthType === "employment"
-                              ? "border-primary bg-primary text-primary-foreground"
-                              : "border-border bg-background text-foreground"
-                          }`}
-                          disabled={isSaving}
-                          onClick={() =>
-                            updateSummaryMonthType(index, "employment")
-                          }
-                          type="button"
-                        >
-                          Employment / pre-business month
-                        </button>
-                      </div>
-                    </div>
-
-                    <label className="block">
-                      <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                        <span>Hours worked</span>
-                        <InfoHelp
-                          body={
-                            summary.monthType === "employment"
-                              ? "Optional hours worked for that employment / pre-business month."
-                              : "Total hours worked in that older business month. This helps the dashboard track yearly pace and compare your actual work time against your weekly and yearly planning, without needing daily entries for that month."
-                          }
-                          title="Backfill hours worked"
-                        />
-                      </span>
-                      <input
-                        className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                          rowInvalidFields.hours
-                            ? "border-rose-300 bg-rose-50/50 focus:border-rose-500"
-                            : "border-border focus:border-primary"
-                        }`}
-                        disabled={isSaving}
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={summary.hours ?? ""}
-                        onClick={selectPrefilledZeroOnClick}
-                        onFocus={selectPrefilledZeroOnFocus}
-                        onChange={(event) =>
-                          updateSummaryField(
-                            index,
-                            "hours",
-                            summary.monthType === "employment"
-                              ? parseOptionalNumber(event.target.value)
-                              : parseNumber(event.target.value),
-                          )
-                        }
-                      />
-                    </label>
-
-                    {summary.monthType === "employment" ? (
-                      <>
-                        <label className="block">
-                          <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                            <span>Gross salary</span>
-                            <InfoHelp
-                              body="Total salary for that month before tax and other deductions."
-                              title="Gross salary"
-                            />
-                          </span>
-                          <input
-                            className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                              rowInvalidFields.grossSalary
-                                ? "border-rose-300 bg-rose-50/50 focus:border-rose-500"
-                                : "border-border focus:border-primary"
-                            }`}
-                            disabled={isSaving}
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={summary.grossSalary ?? ""}
-                            onChange={(event) =>
-                              updateSummaryField(
-                                index,
-                                "grossSalary",
-                                parseOptionalNumber(event.target.value),
-                              )
-                            }
-                          />
-                        </label>
-
-                        <label className="block">
-                          <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                            <span>Net salary received</span>
-                            <InfoHelp
-                              body="What actually paid into your bank account."
-                              title="Net salary received"
-                            />
-                          </span>
-                          <input
-                            className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                              rowInvalidFields.netSalaryReceived
-                                ? "border-rose-300 bg-rose-50/50 focus:border-rose-500"
-                                : "border-border focus:border-primary"
-                            }`}
-                            disabled={isSaving}
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={summary.netSalaryReceived ?? ""}
-                            onChange={(event) =>
-                              updateSummaryField(
-                                index,
-                                "netSalaryReceived",
-                                parseOptionalNumber(event.target.value),
-                              )
-                            }
-                          />
-                        </label>
-
-                        <label className="block">
-                          <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                            <span>Tax already withheld</span>
-                            <InfoHelp
-                              body={TAX_ALREADY_WITHHELD_EXPLANATION}
-                              title="Tax already withheld"
-                            />
-                          </span>
-                          <input
-                            className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                              rowInvalidFields.taxAlreadyWithheld
-                                ? "border-rose-300 bg-rose-50/50 focus:border-rose-500"
-                                : "border-border focus:border-primary"
-                            }`}
-                            disabled={isSaving}
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={summary.taxAlreadyWithheld ?? ""}
-                            onChange={(event) =>
-                              updateSummaryField(
-                                index,
-                                "taxAlreadyWithheld",
-                                parseOptionalNumber(event.target.value),
-                              )
-                            }
-                          />
-                        </label>
-                      </>
-                    ) : (
-                      <>
-                        <label className="block">
-                          <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                            <span>Invoiced amount (excl. VAT)</span>
-                            <InfoHelp
-                              body={`The total amount you billed in that older business month, excluding VAT. This is used for yearly progress, take-home projection, and tax planning. ${BEFORE_TAX_AMOUNT_EXPLANATION} If daily entries exist for the same month, those entries still win.`}
-                              title="Backfill invoiced amount"
-                            />
-                          </span>
-                          <input
-                            className={`w-full rounded-2xl border bg-background px-4 py-3 text-base outline-none transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                              rowInvalidFields.invoicedIncome
-                                ? "border-rose-300 bg-rose-50/50 focus:border-rose-500"
-                                : "border-border focus:border-primary"
-                            }`}
-                            disabled={isSaving}
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={summary.invoicedIncome ?? ""}
-                            onClick={selectPrefilledZeroOnClick}
-                            onFocus={selectPrefilledZeroOnFocus}
-                            onChange={(event) =>
-                              updateSummaryField(
-                                index,
-                                "invoicedIncome",
-                                parseOptionalNumber(event.target.value),
-                              )
-                            }
-                          />
-                        </label>
-
-                        <label className="block">
-                          <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                            <span>Paid amount received (excl. VAT)</span>
-                            <InfoHelp
-                              body={`The total amount you actually received in that older business month, excluding VAT. This helps the dashboard reflect cash received separately from what was invoiced.`}
-                              title="Backfill paid amount received"
-                            />
-                          </span>
-                          <input
-                            className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
-                            disabled={isSaving}
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={summary.paidIncome ?? ""}
-                            onClick={selectPrefilledZeroOnClick}
-                            onFocus={selectPrefilledZeroOnFocus}
-                            onChange={(event) =>
-                              updateSummaryField(
-                                index,
-                                "paidIncome",
-                                parseOptionalNumber(event.target.value),
-                              )
-                            }
-                          />
-                        </label>
-
-                        <label className="block">
-                          <span className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-                            <span>Business expenses (excl. VAT)</span>
-                            <InfoHelp
-                              body={`Total business expenses for that older business month, excluding VAT. These expenses reduce that month's before-tax amount and help the dashboard estimate your take-home projection and tax more accurately. ${BEFORE_TAX_AMOUNT_EXPLANATION}`}
-                              title="Backfill business expenses"
-                            />
-                          </span>
-                          <input
-                            className="w-full rounded-2xl border border-border bg-background px-4 py-3 text-base outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
-                            disabled={isSaving}
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={summary.expenses ?? ""}
-                            onClick={selectPrefilledZeroOnClick}
-                            onFocus={selectPrefilledZeroOnFocus}
-                            onChange={(event) =>
-                              updateSummaryField(
-                                index,
-                                "expenses",
-                                parseOptionalNumber(event.target.value),
-                              )
-                            }
-                          />
-                        </label>
-                      </>
+                return (
+                  <div
+                    key={`${summary.monthKey}-${index}`}
+                    ref={(node) => {
+                      monthCardRefs.current[rowKey] = node;
+                    }}
+                    className={cx(
+                      "@container rounded-[16px] border transition",
+                      isInvalidSummaryRow
+                        ? "border-[#ff6b5b]/60 bg-[#240c09]/60"
+                        : isExpanded
+                          ? "border-[#e7b277]/45 bg-[#140f0b]"
+                          : "border-[#8a603d]/35 bg-[#120d0a]/80",
                     )}
-                  </div>
-
-                  <button
-                    className="mt-3 text-sm font-medium text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={isSaving}
-                    onClick={() => requestRemoveMonthSummary(index)}
-                    type="button"
                   >
-                    Remove month
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </section>
+                    <button
+                      aria-expanded={isExpanded}
+                      className="flex w-full items-center gap-3 px-3.5 py-3 text-left"
+                      disabled={!isSavedMonth || isInvalidSummaryRow}
+                      onClick={() => toggleMonthExpanded(summary.monthKey)}
+                      type="button"
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[15px] font-semibold text-[#f3e4cf]">
+                          {summary.monthKey ? formatMonthKey(summary.monthKey) : "New month"}
+                        </span>
+                        <span className="mt-0.5 block truncate text-xs text-[#a88c71]">
+                          {isEmployment
+                            ? `Employment · ${formatCurrency(summary.grossSalary ?? 0)} gross`
+                            : `${formatHours(summaryWorkLineTotals.hours)} · ${formatCurrency(summaryWorkLineTotals.income)}${
+                                (summary.expenses ?? 0) > 0
+                                  ? ` · ${formatCurrency(summary.expenses ?? 0)} expenses`
+                                  : ""
+                              }`}
+                          {!isSavedMonth ? " · not saved" : ""}
+                        </span>
+                      </span>
+                      {isSavedMonth && !isInvalidSummaryRow ? (
+                        <span
+                          aria-hidden="true"
+                          className={cx(
+                            "text-lg leading-none text-[#c9a57f] transition",
+                            isExpanded && "rotate-90",
+                          )}
+                        >
+                          ›
+                        </span>
+                      ) : null}
+                    </button>
 
-        <section className="rounded-[1.8rem] border border-border bg-card p-5 shadow-sm">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm text-muted-foreground">
-              {hasPendingChanges
-                ? "You have unsaved changes."
-                : "No pending changes."}
-            </p>
-            <button
-              className="rounded-2xl bg-primary px-4 py-3 text-base font-semibold text-primary-foreground transition hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={!hasPendingChanges || isSaving}
-              type="submit"
-            >
-              {isSaving
-                ? "Saving..."
-                : hasPendingChanges
-                  ? "Save changes"
-                  : "Saved"}
-            </button>
-          </div>
+                    {isExpanded ? (
+                      <div className="space-y-4 border-t border-[#8a603d]/30 px-3.5 pb-4 pt-3.5">
+                        <div className="grid gap-3 @md:grid-cols-2">
+                          <label className="block min-w-0">
+                            <FieldLabel>Month</FieldLabel>
+                            <input
+                              ref={(node) => {
+                                monthInputRefs.current[rowKey] = node;
+                              }}
+                              className={inputClassName(rowInvalidFields.monthKey === true)}
+                              disabled={isSaving}
+                              type="month"
+                              value={summary.monthKey}
+                              onChange={(event) =>
+                                updateSummaryField(index, "monthKey", event.target.value)
+                              }
+                            />
+                          </label>
+                          <div className="min-w-0">
+                            <FieldLabel>Type</FieldLabel>
+                            <Segmented<MonthlySummary["monthType"]>
+                              disabled={isSaving}
+                              label="Month type"
+                              onChange={(value) => updateSummaryMonthType(index, value)}
+                              options={[
+                                { value: "business", label: "Business" },
+                                { value: "employment", label: "Employed" },
+                              ]}
+                              value={summary.monthType}
+                            />
+                          </div>
+                        </div>
 
-          {formMessage ? (
-            <p
-              className={`mt-3 text-sm ${isErrorMessage ? "text-rose-700" : "text-muted-foreground"}`}
-            >
-              {formMessage}
-            </p>
-          ) : null}
-        </section>
+                        {isEmployment ? (
+                          <div className="space-y-3">
+                            <p className="text-xs leading-5 text-[#a88c71]">
+                              A month before your business, or a month on salary. Copy the
+                              amounts from your payslip.
+                            </p>
+                            <div className="grid grid-cols-2 gap-3">
+                              <NumberField
+                                disabled={isSaving}
+                                invalid={rowInvalidFields.grossSalary === true}
+                                label="Gross salary"
+                                onChange={(value) => updateSummaryField(index, "grossSalary", value)}
+                                prefix="€"
+                                step={0.01}
+                                value={summary.grossSalary}
+                              />
+                              <NumberField
+                                disabled={isSaving}
+                                invalid={rowInvalidFields.netSalaryReceived === true}
+                                label="Net salary"
+                                onChange={(value) => updateSummaryField(index, "netSalaryReceived", value)}
+                                prefix="€"
+                                step={0.01}
+                                value={summary.netSalaryReceived}
+                              />
+                              <NumberField
+                                disabled={isSaving}
+                                info={{ title: "Tax already withheld", body: TAX_ALREADY_WITHHELD_EXPLANATION }}
+                                invalid={rowInvalidFields.taxAlreadyWithheld === true}
+                                label="Tax withheld"
+                                onChange={(value) => updateSummaryField(index, "taxAlreadyWithheld", value)}
+                                prefix="€"
+                                step={0.01}
+                                value={summary.taxAlreadyWithheld}
+                              />
+                              <NumberField
+                                disabled={isSaving}
+                                label="Hours · optional"
+                                onChange={(value) => updateSummaryField(index, "hours", value)}
+                                step={0.25}
+                                suffix="h"
+                                value={summary.hours}
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <div
+                              className={cx(
+                                "space-y-2.5 rounded-[14px] border p-3",
+                                rowInvalidFields.workLines
+                                  ? "border-[#ff6b5b]/60 bg-[#240c09]/50"
+                                  : "border-[#8a603d]/30 bg-[#0f0b08]/60",
+                              )}
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <FieldLabel
+                                  info={{
+                                    title: "Work lines",
+                                    body: `${WORK_LINES_EXPLANATION} ${BEFORE_TAX_AMOUNT_EXPLANATION}`,
+                                  }}
+                                >
+                                  Work
+                                </FieldLabel>
+                                <TextButton disabled={isSaving} onClick={() => addWorkLine(index)}>
+                                  + Line
+                                </TextButton>
+                              </div>
+
+                              {summaryWorkLines.length === 0 ? (
+                                <p className="text-xs text-[#a88c71]">
+                                  No work yet. Add a line with your hours and rate, or leave it empty
+                                  for an expense-only month.
+                                </p>
+                              ) : (
+                                summaryWorkLines.map((workLine, lineIndex) => {
+                                  const lineHours = workLine.hours ?? 0;
+                                  const lineTotal = workLine.totalIncome ?? 0;
+                                  const isUsingLineTotal = lineTotal > 0;
+                                  const lineIncome = getWorkLineIncome(workLine);
+
+                                  return (
+                                    <div
+                                      key={lineIndex}
+                                      className="space-y-2.5 rounded-[12px] border border-[#8a603d]/25 bg-[#120d0a] p-2.5"
+                                    >
+                                      <div className="flex items-end gap-2">
+                                        <label className="block min-w-0 flex-1">
+                                          <FieldLabel>Label · optional</FieldLabel>
+                                          <input
+                                            className={inputClassName(false, "py-2.5 text-sm")}
+                                            disabled={isSaving}
+                                            placeholder="e.g. Handyman"
+                                            type="text"
+                                            value={workLine.label}
+                                            onChange={(event) =>
+                                              updateWorkLineField(index, lineIndex, "label", event.target.value)
+                                            }
+                                          />
+                                        </label>
+                                        <IconButton
+                                          className="mb-0.5"
+                                          disabled={isSaving}
+                                          label="Remove line"
+                                          onClick={() => requestRemoveWorkLine(index, lineIndex, workLine)}
+                                        >
+                                          ×
+                                        </IconButton>
+                                      </div>
+                                      <div className="grid grid-cols-3 gap-2">
+                                        <label className="block min-w-0">
+                                          <FieldLabel>Hours</FieldLabel>
+                                          <input
+                                            className={inputClassName(false, "px-3 py-2.5 text-sm")}
+                                            disabled={isSaving}
+                                            inputMode="decimal"
+                                            min="0"
+                                            step="0.01"
+                                            type="number"
+                                            value={workLine.hours ?? ""}
+                                            onChange={(event) =>
+                                              updateWorkLineField(
+                                                index,
+                                                lineIndex,
+                                                "hours",
+                                                parseOptionalNumber(event.target.value),
+                                              )
+                                            }
+                                          />
+                                        </label>
+                                        <label className={cx("block min-w-0 transition", isUsingLineTotal && "opacity-50")}>
+                                          <FieldLabel>Rate €/h</FieldLabel>
+                                          <input
+                                            className={inputClassName(false, "px-3 py-2.5 text-sm")}
+                                            disabled={isSaving}
+                                            inputMode="decimal"
+                                            min="0"
+                                            step="0.01"
+                                            type="number"
+                                            value={workLine.hourlyRate ?? ""}
+                                            onChange={(event) =>
+                                              updateWorkLineField(
+                                                index,
+                                                lineIndex,
+                                                "hourlyRate",
+                                                parseOptionalNumber(event.target.value),
+                                              )
+                                            }
+                                          />
+                                        </label>
+                                        <label className="block min-w-0">
+                                          <FieldLabel>Total €</FieldLabel>
+                                          <input
+                                            className={inputClassName(false, "px-3 py-2.5 text-sm")}
+                                            disabled={isSaving}
+                                            inputMode="decimal"
+                                            min="0"
+                                            placeholder="optional"
+                                            step="0.01"
+                                            type="number"
+                                            value={workLine.totalIncome ?? ""}
+                                            onChange={(event) =>
+                                              updateWorkLineField(
+                                                index,
+                                                lineIndex,
+                                                "totalIncome",
+                                                parseOptionalNumber(event.target.value),
+                                              )
+                                            }
+                                          />
+                                        </label>
+                                      </div>
+                                      <p className="text-xs leading-5 text-[#a88c71]">
+                                        {isUsingLineTotal ? (
+                                          lineHours > 0 ? (
+                                            <>
+                                              Works out to{" "}
+                                              <span className="font-semibold text-[#f3e4cf]">
+                                                {formatCurrencyPrecise(lineTotal / lineHours)}
+                                              </span>{" "}
+                                              per hour. The total counts; the rate is ignored.
+                                            </>
+                                          ) : (
+                                            "Add the hours to see the hourly rate this total works out to."
+                                          )
+                                        ) : lineIncome > 0 ? (
+                                          <>
+                                            {formatHoursPrecise(lineHours)} ×{" "}
+                                            {formatCurrencyPrecise(workLine.hourlyRate ?? 0)} ={" "}
+                                            <span className="font-semibold text-[#f3e4cf]">
+                                              {formatCurrencyPrecise(lineIncome)}
+                                            </span>
+                                          </>
+                                        ) : (
+                                          "Hours and a rate, or a total for a fixed-price job."
+                                        )}
+                                      </p>
+                                    </div>
+                                  );
+                                })
+                              )}
+
+                              {summaryWorkLines.length > 0 ? (
+                                <p className="flex justify-between border-t border-[#8a603d]/25 pt-2 text-xs text-[#a88c71]">
+                                  <span>Month total</span>
+                                  <span className="font-semibold text-[#f3e4cf]">
+                                    {formatHours(summaryWorkLineTotals.hours)} ·{" "}
+                                    {formatCurrencyPrecise(summaryWorkLineTotals.income)}
+                                  </span>
+                                </p>
+                              ) : null}
+                            </div>
+
+                            <NumberField
+                              disabled={isSaving}
+                              info={{
+                                title: "Business expenses",
+                                body: `Total business expenses that month, excluding VAT. ${BEFORE_TAX_AMOUNT_EXPLANATION}`,
+                              }}
+                              label="Expenses (excl. VAT)"
+                              onChange={(value) => updateSummaryField(index, "expenses", value)}
+                              prefix="€"
+                              step={0.01}
+                              value={summary.expenses}
+                            />
+                          </>
+                        )}
+
+                        <div className="flex justify-end">
+                          <TextButton
+                            className="text-[#ff9c8e] hover:text-[#ffd9d2]"
+                            disabled={isSaving}
+                            onClick={() => requestRemoveMonthSummary(index)}
+                          >
+                            Delete month
+                          </TextButton>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <p className="mt-3 text-xs leading-5 text-[#8f7559]">
+            Amounts exclude VAT. If a month also has daily reports, the daily reports are used
+            instead of the month total.
+          </p>
+        </Panel>
+
       </form>
+
+      <SaveBar
+        isSaving={isSaving}
+        onDiscard={() => setIsDiscardConfirmOpen(true)}
+        onSave={() => {
+          void saveConfigurationDraft();
+        }}
+        saveLabel="Save changes"
+        visible={hasPendingChanges || isSaving}
+      />
     </>
   );
 }

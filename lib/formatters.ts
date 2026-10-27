@@ -34,6 +34,11 @@ export function formatHours(value: number) {
   return `${numberFormatter.format(value)}h`
 }
 
+// Two decimals, for calculations shown next to the hours a user typed (e.g. 22.35h).
+export function formatHoursPrecise(value: number) {
+  return `${preciseNumberFormatter.format(value)}h`
+}
+
 export function formatNumber(value: number) {
   return numberFormatter.format(value)
 }

@@ -18,11 +18,19 @@ export interface DailyEntry {
   dayStatus?: DayStatus
   hours: number
   invoicedIncome: number
-  paidIncome: number
   expenses: number
   note?: string
   source?: string
   workItems?: WorkItem[]
+}
+
+// One line of work in a backfilled business month. Income is hours x rate,
+// unless totalIncome is set (fixed-price jobs), which then wins.
+export interface MonthWorkLine {
+  label: string
+  hours: number | null
+  hourlyRate: number | null
+  totalIncome: number | null
 }
 
 export interface MonthlySummary {
@@ -30,7 +38,7 @@ export interface MonthlySummary {
   monthType: MonthType
   hours: number | null
   invoicedIncome: number | null
-  paidIncome: number | null
+  workLines?: MonthWorkLine[]
   expenses: number | null
   grossSalary: number | null
   netSalaryReceived: number | null
@@ -45,6 +53,7 @@ export interface Settings {
   weeklyHoursTarget: number | null
   reserveBufferPercent: number | null
   qualifiesForSelfEmployedDeduction: boolean | null
+  qualifiesForStartersDeduction: boolean | null
   vacationDaysPerYear: number | null
 }
 

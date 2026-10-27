@@ -1,4 +1,12 @@
-import type { DailyEntry, MonthlySummary, Screen, Settings, StoredAppState, WorkItem } from './types'
+import type {
+  DailyEntry,
+  MonthlySummary,
+  MonthWorkLine,
+  Screen,
+  Settings,
+  StoredAppState,
+  WorkItem,
+} from './types'
 
 export const STORAGE_KEY = 'financial-goal-mvp-state'
 
@@ -10,6 +18,7 @@ export const defaultSettings: Settings = {
   weeklyHoursTarget: 30,
   reserveBufferPercent: 5,
   qualifiesForSelfEmployedDeduction: true,
+  qualifiesForStartersDeduction: false,
   vacationDaysPerYear: 0,
 }
 
@@ -21,6 +30,7 @@ export const emptySettings: Settings = {
   weeklyHoursTarget: null,
   reserveBufferPercent: null,
   qualifiesForSelfEmployedDeduction: null,
+  qualifiesForStartersDeduction: null,
   vacationDaysPerYear: null,
 }
 
@@ -29,7 +39,6 @@ export const defaultMonthlySummaries: MonthlySummary[] = [
     monthKey: '2026-01',
     monthType: 'business',
     invoicedIncome: 4262.78,
-    paidIncome: 4262.78,
     expenses: 1685.11,
     hours: 76.36,
     grossSalary: null,
@@ -40,7 +49,6 @@ export const defaultMonthlySummaries: MonthlySummary[] = [
     monthKey: '2026-02',
     monthType: 'business',
     invoicedIncome: 1620.06,
-    paidIncome: 0,
     expenses: 694.32,
     hours: 80.93,
     grossSalary: null,
@@ -51,7 +59,6 @@ export const defaultMonthlySummaries: MonthlySummary[] = [
     monthKey: '2026-03',
     monthType: 'business',
     invoicedIncome: 11921.22,
-    paidIncome: 0,
     expenses: 754.53,
     hours: 234.1,
     grossSalary: null,
@@ -153,6 +160,7 @@ export function normalizeSettings(value: unknown): Settings {
     qualifiesForSelfEmployedDeduction: readNullableBoolean(
       value.qualifiesForSelfEmployedDeduction,
     ),
+    qualifiesForStartersDeduction: readNullableBoolean(value.qualifiesForStartersDeduction),
     vacationDaysPerYear: readNullableNumber(value.vacationDaysPerYear),
   }
 }
@@ -165,20 +173,9 @@ export function normalizeEntry(value: unknown): DailyEntry | null {
   const id = readString(value.id)
   const date = readString(value.date)
   const hours = readNumber(value.hours, NaN)
-  const legacyIncome = readNumber(value.income, NaN)
-  const hasExplicitInvoicedIncome = typeof value.invoicedIncome === 'number'
-  const invoicedIncome = readNumber(value.invoicedIncome, legacyIncome)
-  const paidFallback =
-    Number.isFinite(legacyIncome) && !hasExplicitInvoicedIncome ? legacyIncome : 0
-  const paidIncome = readNumber(value.paidIncome, paidFallback)
+  const invoicedIncome = readNumber(value.invoicedIncome, readNumber(value.income, NaN))
 
-  if (
-    !id ||
-    !date ||
-    !Number.isFinite(hours) ||
-    !Number.isFinite(invoicedIncome) ||
-    !Number.isFinite(paidIncome)
-  ) {
+  if (!id || !date || !Number.isFinite(hours) || !Number.isFinite(invoicedIncome)) {
     return null
   }
 
@@ -198,11 +195,23 @@ export function normalizeEntry(value: unknown): DailyEntry | null {
         : 'worked',
     hours,
     invoicedIncome,
-    paidIncome,
     expenses: readNumber(value.expenses ?? value.expense, 0),
     note: readString(value.note),
     source: readString(value.source),
     ...(workItems && workItems.length > 0 ? { workItems } : {}),
+  }
+}
+
+function normalizeMonthWorkLine(value: unknown): MonthWorkLine | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  return {
+    label: readString(value.label) ?? '',
+    hours: readNullableNumber(value.hours),
+    hourlyRate: readNullableNumber(value.hourlyRate ?? value.hourly_rate),
+    totalIncome: readNullableNumber(value.totalIncome ?? value.total_income),
   }
 }
 
@@ -218,12 +227,18 @@ export function normalizeMonthlySummary(value: unknown): MonthlySummary | null {
   }
 
   const monthType = readMonthType(value.monthType)
+  const rawWorkLines = value.workLines ?? value.work_lines
+  const workLines = Array.isArray(rawWorkLines)
+    ? rawWorkLines
+        .map((workLine) => normalizeMonthWorkLine(workLine))
+        .filter((workLine): workLine is MonthWorkLine => workLine !== null)
+    : []
 
   return {
     monthKey,
     monthType,
     invoicedIncome: readNullableNumber(value.invoicedIncome ?? value.income),
-    paidIncome: readNullableNumber(value.paidIncome),
+    ...(workLines.length > 0 ? { workLines } : {}),
     expenses: readNullableNumber(value.expenses ?? value.expense),
     hours: readNullableNumber(value.hours),
     grossSalary: readNullableNumber(value.grossSalary),

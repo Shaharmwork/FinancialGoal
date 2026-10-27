@@ -5,6 +5,10 @@
  * - no fiscal partner interaction is included in this tax logic
  * - employment income is included as gross salary when monthly summaries provide it
  * - business result is based on invoiced business income minus business expenses
+ * - the starters' deduction is only applied when the user says they qualify, and only on top
+ *   of the self-employed deduction (both need the 1,225-hours rule)
+ * - the health contribution (Zvw) is charged on taxable profit, i.e. after the entrepreneur
+ *   deductions and the SME profit exemption
  */
 interface AnnualTaxInput {
   annualBusinessIncome: number
@@ -12,6 +16,7 @@ interface AnnualTaxInput {
   annualEmploymentGrossSalary?: number
   annualTaxAlreadyWithheld?: number
   qualifiesForSelfEmployedDeduction: boolean
+  qualifiesForStartersDeduction?: boolean
 }
 
 export interface AnnualTaxEstimate {
@@ -23,6 +28,7 @@ export interface AnnualTaxEstimate {
   annualTaxAlreadyWithheld: number
   qualifiesForSelfEmployedDeduction: boolean
   selfEmployedDeduction: number
+  startersDeduction: number
   profitAfterDeduction: number
   smallBusinessProfitExemptionRate: number
   taxableProfit: number
@@ -111,8 +117,11 @@ function calculateWorkTaxCredit(annualWorkIncome: number) {
   return 0
 }
 
-function calculateHealthContribution(annualBusinessProfit: number) {
-  return Math.max(0, Math.min(annualBusinessProfit, 79409) * 0.0485)
+// Salary already counts towards the yearly Zvw maximum (the employer pays Zvw on it),
+// so only the room left under the cap is charged on taxable profit.
+function calculateHealthContribution(taxableProfit: number, employmentGrossSalary: number) {
+  const remainingContributionBase = Math.max(0, 79409 - employmentGrossSalary)
+  return Math.max(0, Math.min(taxableProfit, remainingContributionBase) * 0.0485)
 }
 
 export function estimateAnnualTaxFor2026({
@@ -121,13 +130,19 @@ export function estimateAnnualTaxFor2026({
   annualEmploymentGrossSalary = 0,
   annualTaxAlreadyWithheld = 0,
   qualifiesForSelfEmployedDeduction,
+  qualifiesForStartersDeduction = false,
 }: AnnualTaxInput): AnnualTaxEstimate {
   const annualBusinessProfit = Math.max(0, annualBusinessIncome - annualBusinessExpenses)
   const normalizedEmploymentGrossSalary = Math.max(0, annualEmploymentGrossSalary)
   const normalizedTaxAlreadyWithheld = Math.max(0, annualTaxAlreadyWithheld)
   const annualCombinedPreTaxIncome = annualBusinessProfit + normalizedEmploymentGrossSalary
   const selfEmployedDeduction = qualifiesForSelfEmployedDeduction ? 1200 : 0
-  const profitAfterDeduction = Math.max(0, annualBusinessProfit - selfEmployedDeduction)
+  const startersDeduction =
+    qualifiesForSelfEmployedDeduction && qualifiesForStartersDeduction ? 2123 : 0
+  const profitAfterDeduction = Math.max(
+    0,
+    annualBusinessProfit - selfEmployedDeduction - startersDeduction,
+  )
   const smallBusinessProfitExemptionRate = 0.127
   const taxableProfit = profitAfterDeduction * (1 - smallBusinessProfitExemptionRate)
   const taxableEmploymentIncome = normalizedEmploymentGrossSalary
@@ -135,7 +150,10 @@ export function estimateAnnualTaxFor2026({
   const incomeTaxBeforeCredits = calculateIncomeTaxBeforeCredits(taxableIncome)
   const generalTaxCredit = calculateGeneralTaxCredit(taxableIncome)
   const workTaxCredit = calculateWorkTaxCredit(annualCombinedPreTaxIncome)
-  const healthContribution = calculateHealthContribution(annualBusinessProfit)
+  const healthContribution = calculateHealthContribution(
+    taxableProfit,
+    normalizedEmploymentGrossSalary,
+  )
   const estimatedAnnualTax =
     Math.max(0, incomeTaxBeforeCredits - generalTaxCredit - workTaxCredit) +
     healthContribution
@@ -152,6 +170,7 @@ export function estimateAnnualTaxFor2026({
     annualTaxAlreadyWithheld: roundCurrency(normalizedTaxAlreadyWithheld),
     qualifiesForSelfEmployedDeduction,
     selfEmployedDeduction: roundCurrency(selfEmployedDeduction),
+    startersDeduction: roundCurrency(startersDeduction),
     profitAfterDeduction: roundCurrency(profitAfterDeduction),
     smallBusinessProfitExemptionRate,
     taxableProfit: roundCurrency(taxableProfit),
@@ -171,9 +190,11 @@ export function estimateAnnualTaxFor2026({
 export function estimateRequiredAnnualBusinessProfitForTargetNet2026({
   targetAnnualNet,
   qualifiesForSelfEmployedDeduction,
+  qualifiesForStartersDeduction = false,
 }: {
   targetAnnualNet: number
   qualifiesForSelfEmployedDeduction: boolean
+  qualifiesForStartersDeduction?: boolean
 }) {
   if (targetAnnualNet <= 0) {
     return 0
@@ -187,6 +208,7 @@ export function estimateRequiredAnnualBusinessProfitForTargetNet2026({
       annualBusinessIncome: upperBound,
       annualBusinessExpenses: 0,
       qualifiesForSelfEmployedDeduction,
+      qualifiesForStartersDeduction,
     }).projectedAnnualNet < targetAnnualNet &&
     upperBound < 500000
   ) {
@@ -199,6 +221,7 @@ export function estimateRequiredAnnualBusinessProfitForTargetNet2026({
       annualBusinessIncome: midpoint,
       annualBusinessExpenses: 0,
       qualifiesForSelfEmployedDeduction,
+      qualifiesForStartersDeduction,
     })
 
     if (estimate.projectedAnnualNet >= targetAnnualNet) {

@@ -28,6 +28,7 @@ interface AppSettingsRow {
   spouse_monthly_income?: number | null
   reserve_buffer_percent?: number | null
   qualifies_for_self_employed_deduction?: boolean | null
+  qualifies_for_starters_deduction?: boolean | null
   vacation_days_per_year?: number | null
   user_id?: string
 }
@@ -65,7 +66,7 @@ interface MonthlySummaryRow {
   month_type?: string | null
   hours: number | null
   invoiced_income: number | null
-  paid_income: number | null
+  work_lines?: unknown
   expenses: number | null
   gross_salary?: number | null
   net_salary_received?: number | null
@@ -101,6 +102,7 @@ function mapSettingsFromRow(row: AppSettingsRow | null): Settings {
     defaultShiftHours: row.default_shift_hours,
     defaultShiftIncome: row.default_shift_income,
     qualifiesForSelfEmployedDeduction: row.qualifies_for_self_employed_deduction,
+    qualifiesForStartersDeduction: row.qualifies_for_starters_deduction,
     reserveBufferPercent: row.reserve_buffer_percent,
     spouseMonthlyIncome: row.spouse_monthly_income,
     targetNetMonth: row.target_net_month,
@@ -115,6 +117,7 @@ function mapSettingsToRow(settings: Settings, userId: string) {
     default_shift_income: settings.defaultShiftIncome,
     user_id: userId,
     qualifies_for_self_employed_deduction: settings.qualifiesForSelfEmployedDeduction,
+    qualifies_for_starters_deduction: settings.qualifiesForStartersDeduction,
     reserve_buffer_percent: settings.reserveBufferPercent,
     spouse_monthly_income: settings.spouseMonthlyIncome,
     target_net_month: settings.targetNetMonth,
@@ -158,7 +161,6 @@ function mapEntryFromRow(row: DailyEntryRow, workItems: WorkItem[] = []): DailyE
     id: row.id,
     invoicedIncome: row.invoiced_income,
     note: row.note,
-    paidIncome: row.paid_income,
     source: row.source,
     workItems: isWorkedEntry ? workItems : [],
   })
@@ -176,16 +178,18 @@ function mapEntryFromRow(row: DailyEntryRow, workItems: WorkItem[] = []): DailyE
 
 function mapEntryToRow(entry: DailyEntry, userId: string) {
   const isWorkedEntry = (entry.dayStatus ?? 'worked') === 'worked'
+  const invoicedIncome = isWorkedEntry ? getEntryInvoicedIncome(entry) : 0
 
+  // The app only tracks earned income; paid_income is kept equal to it for the legacy column.
   return {
     date: entry.date,
     day_status: entry.dayStatus ?? 'worked',
     expenses: entry.expenses,
     hours: isWorkedEntry ? getEntryHours(entry) : 0,
     id: entry.id,
-    invoiced_income: isWorkedEntry ? getEntryInvoicedIncome(entry) : 0,
+    invoiced_income: invoicedIncome,
     note: entry.note ?? null,
-    paid_income: isWorkedEntry ? entry.paidIncome : 0,
+    paid_income: invoicedIncome,
     source: entry.source ?? null,
     user_id: userId,
   }
@@ -224,8 +228,8 @@ function mapMonthlySummaryFromRow(row: MonthlySummaryRow): MonthlySummary | null
     monthType: row.month_type,
     monthKey: row.month_key,
     netSalaryReceived: row.net_salary_received,
-    paidIncome: row.paid_income,
     taxAlreadyWithheld: row.tax_already_withheld,
+    workLines: row.work_lines,
   })
 }
 
@@ -238,9 +242,10 @@ function mapMonthlySummaryToRow(summary: MonthlySummary, userId: string) {
     month_key: summary.monthKey,
     month_type: summary.monthType,
     net_salary_received: summary.netSalaryReceived,
-    paid_income: summary.paidIncome,
+    paid_income: summary.invoicedIncome,
     tax_already_withheld: summary.taxAlreadyWithheld,
     user_id: userId,
+    work_lines: summary.workLines && summary.workLines.length > 0 ? summary.workLines : null,
   }
 }
 
@@ -258,7 +263,6 @@ async function replaceDailyEntries(entries: DailyEntry[]) {
         ...entry,
         hours: 0,
         invoicedIncome: 0,
-        paidIncome: 0,
         expenses: entry.expenses,
         workItems: undefined,
       }
