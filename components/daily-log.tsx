@@ -1291,7 +1291,9 @@ export function DailyLog({
   const isSelectedDayToday = date === todayDateKey
   const isSelectedDayFuture = date > todayDateKey
   const flatHourlyRate = hourlyRate.trim() !== '' ? parseNumber(hourlyRate) : configuredHourlyRate
-  const isEditorDisabled = isSelectedMonthEmployment
+  // Editing is locked while a save is in flight: the drafts are cleared once it's
+  // confirmed, so an edit made meanwhile would otherwise be lost.
+  const isEditorDisabled = isSelectedMonthEmployment || isSaving
 
   // Saved before the app stored how a day was priced: shown (and kept) as a total.
   const isLegacyTotalDay =
@@ -1587,6 +1589,7 @@ export function DailyLog({
           titleAction={
             selectedEntry ? (
               <IconButton
+                disabled={isSaving}
                 label={`Delete ${formatDate(parseDateKey(date))}`}
                 onClick={() => handleRequestDeleteEntry(selectedEntry)}
               >
