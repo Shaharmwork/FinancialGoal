@@ -13,9 +13,9 @@ import SliderFill from "@/src/assets/web/icons/SliderFill.png";
 import TaxReserveIcon from "@/src/assets/web/icons/TaxReserveIcon.png";
 import { getDashboardAlert, type DashboardAlert } from "@/lib/dashboard-alerts";
 import { InfoHelp } from "@/components/info-help";
-import { PhoneStage, STAGE_WIDTH } from "@/components/phone-stage";
+import { STAGE_WIDTH } from "@/components/phone-stage";
 import { isSupportedTaxYear, SUPPORTED_TAX_YEAR } from "@/lib/tax-engine";
-import type { DailyEntry, MonthlySummary, Screen, Settings } from "@/lib/types";
+import type { DailyEntry, MonthlySummary, Settings } from "@/lib/types";
 import {
   getCurrentMonthStats,
   getCurrentWeekStats,
@@ -461,7 +461,6 @@ interface DashboardProps {
   entries: DailyEntry[];
   isReportsAlertDismissed: boolean;
   monthlySummaries: MonthlySummary[];
-  onNavigate?: (screen: Screen) => void;
   onGreetingShown?: () => void;
   onOpenConfigurationSetup: () => void;
   onAddPreviousMonths: (monthKey?: string) => void;
@@ -477,7 +476,6 @@ export function Dashboard({
   entries,
   isReportsAlertDismissed,
   monthlySummaries,
-  onNavigate,
   onGreetingShown,
   onOpenConfigurationSetup,
   onAddPreviousMonths,
@@ -629,7 +627,7 @@ export function Dashboard({
   }, []);
 
   return (
-    <PhoneStage active="dashboard" onNavigate={onNavigate} variant="artwork">
+    <>
           <DashboardBannerAnimationStyles />
 
           <WeeklyStrip
@@ -709,7 +707,7 @@ export function Dashboard({
             yearlyNetGoal={yearlyNetGoal}
           />
 
-    </PhoneStage>
+    </>
   );
 }
 
@@ -1653,15 +1651,16 @@ function YearlyPlanningCard({
             </div>
 
             <div
-              className="absolute left-0 right-0 px-1"
-              style={{ top: DASHBOARD_POS.tax.itemsY }}
+              className={hasBusinessHistory && unsupportedTaxYear === undefined
+                ? "absolute left-0 right-0 px-1"
+                : "absolute left-0 right-0"}
+              style={{
+                top: hasBusinessHistory && unsupportedTaxYear === undefined
+                  ? DASHBOARD_POS.tax.itemsY
+                  : DASHBOARD_POS.tax.itemsY - 20,
+              }}
             >
-              {unsupportedTaxYear !== undefined ? (
-                <p className="dashboard-gold-soft min-h-[40px] rounded-xl border border-[#a77b4e]/40 bg-[#140f0b]/85 px-3 py-3 text-center text-[12px] leading-[1.35] shadow-lg">
-                  Tax estimates for {unsupportedTaxYear} aren&apos;t available yet.
-                  <br />The app only has the {SUPPORTED_TAX_YEAR} tax rules.
-                </p>
-              ) : hasBusinessHistory ? (
+              {unsupportedTaxYear === undefined && hasBusinessHistory ? (
                 <div
                   className="grid grid-cols-2"
                   style={{ gap: DASHBOARD_POS.tax.gap }}
@@ -1706,10 +1705,17 @@ function YearlyPlanningCard({
                   </div>
                 </div>
               ) : (
-                <p className="dashboard-gold-soft min-h-[40px] rounded-xl border border-[#a77b4e]/40 bg-[#140f0b]/85 px-3 py-3 text-center text-[12px] leading-[1.35] shadow-lg">
-                  Tax guidance starts after you log income
-                  <br />or backfill a month!
-                </p>
+                <div className="flex h-[72px] items-center justify-center rounded-[12px] border border-[#bd9164]/60 bg-[#140f0b]/95 px-4 text-center shadow-[0_4px_14px_rgba(0,0,0,0.4)]">
+                  <p className="text-[12px] font-medium leading-[1.45] text-[#f4ddbd]">
+                    {unsupportedTaxYear !== undefined ? (
+                      <>Tax estimates for {unsupportedTaxYear} aren&apos;t available yet.
+                        <br />The app only has the {SUPPORTED_TAX_YEAR} tax rules.</>
+                    ) : (
+                      <>Tax guidance starts after you log income
+                        <br />or backfill a month!</>
+                    )}
+                  </p>
+                </div>
               )}
             </div>
           </div>

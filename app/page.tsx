@@ -1278,7 +1278,6 @@ export default function Home() {
         entries={entries}
         isReportsAlertDismissed={isReportsAlertDismissedForSession}
         monthlySummaries={monthlySummaries}
-        onNavigate={handleScreenChange}
         onGreetingShown={() => setShouldShowDashboardGreeting(false)}
         onOpenConfigurationSetup={handleOpenConfigurationSetup}
         onAddPreviousMonths={handleAddPreviousMonths}
@@ -1397,15 +1396,11 @@ export default function Home() {
   return (
     <div className="relative isolate min-h-screen overflow-x-hidden text-foreground">
       <main className="relative z-10 min-h-screen w-full" data-screen={currentScreen}>
-        {isDashboardScreen && hasLoadedRemoteState ? (
-          activeScreen
-        ) : (
-          // Report and Configuration share the dashboard's phone stage and dock.
+        {/* Keep the frame and dock mounted while only the screen content changes. */}
           <PhoneStage
-            key={currentScreen}
             active={currentScreen}
             onNavigate={handleScreenChange}
-            variant="screen"
+            variant={isDashboardScreen && hasLoadedRemoteState ? "artwork" : "screen"}
           >
             {!hasLoadedRemoteState ? (
               loadErrorMessage ? (
@@ -1449,7 +1444,6 @@ export default function Home() {
               activeScreen
             )}
           </PhoneStage>
-        )}
       </main>
 
       <Toast
