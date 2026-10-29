@@ -70,7 +70,7 @@ export function getSupabaseClient() {
     {
       auth: {
         autoRefreshToken: true,
-        detectSessionInUrl: false,
+        detectSessionInUrl: true,
         persistSession: true,
         storageKey: getSupabaseAuthStorageKey(),
       },
@@ -182,4 +182,47 @@ export function onSupabaseAuthStateChange(
   return () => {
     subscription.unsubscribe()
   }
+}
+
+// Redirect back to this static app; Supabase's allowed redirect list is enforced.
+function authRedirectUrl() {
+  return new URL(window.location.pathname, window.location.origin).href
+}
+
+function requireAuthClient() {
+  const client = getSupabaseClient()
+  if (!client) throw new Error('Account services are unavailable.')
+  return client
+}
+
+export async function registerWithEmailPassword(email: string, password: string, displayName: string) {
+  const { data, error } = await requireAuthClient().auth.signUp({
+    email, password,
+    options: { emailRedirectTo: authRedirectUrl(), data: { display_name: displayName } },
+  })
+  if (error) throw error
+  // Supabase can mask a repeated signup with a user that has no identities.
+  // This is not proof that a new confirmation email was sent (invites can also
+  // be masked). Offer account recovery without querying the account directory.
+  if (!data.session && Array.isArray(data.user?.identities) && data.user.identities.length === 0) {
+    throw Object.assign(new Error('Registration requires account recovery.'), { code: 'signup_account_recovery' })
+  }
+  return data
+}
+
+export async function resendConfirmationEmail(email: string) {
+  const { error } = await requireAuthClient().auth.resend({
+    type: 'signup', email, options: { emailRedirectTo: authRedirectUrl() },
+  })
+  if (error) throw error
+}
+
+export async function sendPasswordReset(email: string) {
+  const { error } = await requireAuthClient().auth.resetPasswordForEmail(email, { redirectTo: authRedirectUrl() })
+  if (error) throw error
+}
+
+export async function updateAccountPassword(password: string) {
+  const { error } = await requireAuthClient().auth.updateUser({ password })
+  if (error) throw error
 }

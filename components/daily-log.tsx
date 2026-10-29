@@ -1345,7 +1345,7 @@ export function DailyLog({
       return (
         <>
           Leave the rate empty to use your default {formatCurrencyPrecise(configuredHourlyRate)}/h.
-          A standard shift is {formatHours(previewHours)} ={' '}
+          A standard day/shift is {formatHours(previewHours)} ={' '}
           <span className="font-semibold text-[#f3e4cf]">{formatCurrencyPrecise(rateBasedIncome)}</span>.
         </>
       )
