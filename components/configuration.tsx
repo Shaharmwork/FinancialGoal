@@ -266,7 +266,7 @@ function getMissingBaseConfigurationFields(settings: Settings) {
       settings.defaultShiftHours > 0
     )
   ) {
-    missingFields.push("default shift hours");
+    missingFields.push("default day/shift hours");
     missingFieldKeys.push("defaultShiftHours");
   }
 
@@ -1772,14 +1772,14 @@ export function Configuration({
               }}
               inputRef={firstSettingsInputRef}
               invalid={invalidSettingFields.targetNetMonth === true}
-              label="Take-home per month"
+              label="Take-home per month (Net)"
               onChange={(value) => updateField("targetNetMonth", value)}
               placeholder="0"
               prefix="€"
               step={50}
               value={draftSettings.targetNetMonth}
             />
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 items-end gap-3">
               <NumberField
                 disabled={isSaving}
                 info={{
@@ -1788,7 +1788,7 @@ export function Configuration({
                 }}
                 inputRef={weeklyHoursTargetRef}
                 invalid={invalidSettingFields.weeklyHoursTarget === true}
-                label="Hours / week"
+                label="Hours / per week"
                 onChange={(value) => updateField("weeklyHoursTarget", value)}
                 placeholder="0"
                 step={0.5}
@@ -1798,12 +1798,12 @@ export function Configuration({
               <NumberField
                 disabled={isSaving}
                 info={{
-                  title: "Vacation days",
+                  title: "Planned vacation days per year",
                   body: `Days off you plan this year. They lower the hours you can realistically work in the planning check. NL ${new Date().getFullYear()} has ${dutchPublicHolidayWeekdays} public holidays on weekdays.`,
                 }}
                 inputRef={vacationDaysPerYearRef}
                 invalid={invalidSettingFields.vacationDaysPerYear === true}
-                label="Vacation days"
+                label="Planned days off / year"
                 onChange={(value) => updateField("vacationDaysPerYear", value)}
                 placeholder="0"
                 step={1}
@@ -1834,16 +1834,16 @@ export function Configuration({
           subtitle="Used as the default when you report a day or add a month."
           title="Default rate"
         >
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 items-end gap-3">
             <NumberField
               disabled={isSaving}
               info={{
-                title: "Shift income",
-                body: "What you invoice for one standard shift, excluding VAT. Together with the shift hours it sets your default hourly rate.",
+                title: "Day/shift income",
+                body: "What you invoice for one standard day/shift, excluding VAT. Together with the day/shift length it sets your default hourly rate.",
               }}
               inputRef={defaultShiftIncomeRef}
               invalid={invalidSettingFields.defaultShiftIncome === true}
-              label="Per shift"
+              label="Per day/shift"
               onChange={(value) => updateField("defaultShiftIncome", value)}
               placeholder="0"
               prefix="€"
@@ -1854,7 +1854,7 @@ export function Configuration({
               disabled={isSaving}
               inputRef={defaultShiftHoursRef}
               invalid={invalidSettingFields.defaultShiftHours === true}
-              label="Shift length"
+              label="Day/shift length"
               onChange={(value) => updateField("defaultShiftHours", value)}
               placeholder="0"
               step={0.25}
@@ -1948,11 +1948,7 @@ export function Configuration({
                   { value: "no", label: "I don't" },
                 ]}
                 value={
-                  draftSettings.qualifiesForSelfEmployedDeduction === null
-                    ? null
-                    : draftSettings.qualifiesForSelfEmployedDeduction
-                      ? "yes"
-                      : "no"
+                  draftSettings.qualifiesForSelfEmployedDeduction === true ? "yes" : "no"
                 }
               />
             </div>
@@ -2111,7 +2107,7 @@ export function Configuration({
                               A month before your business, or a month on salary. Copy the
                               amounts from your payslip.
                             </p>
-                            <div className="grid grid-cols-2 gap-3">
+                            <div className="grid grid-cols-2 items-end gap-3">
                               <NumberField
                                 disabled={isSaving}
                                 invalid={rowInvalidFields.grossSalary === true}

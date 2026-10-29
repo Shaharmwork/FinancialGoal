@@ -1732,8 +1732,8 @@ function YearlyPlanningCard({
             <DashboardMetricCard
               caption={
                 hoursToRule > 0
-                  ? `${formatHours(hoursToRule)} to ${formatNumber(HOURS_RULE)}h`
-                  : `${formatNumber(HOURS_RULE)}h rule met`
+                  ? `Tax threshold: ${formatHours(hoursToRule)} left`
+                  : `${formatNumber(HOURS_RULE)}h tax threshold reached`
               }
               captionTone={hoursToRule > 0 ? "warn" : "good"}
               icon={ClockIcon}
@@ -1942,7 +1942,7 @@ function DashboardMetricCard({
         </span>
         {caption ? (
           <span
-            className={`mt-1.5 block truncate text-[10px] font-semibold leading-none ${
+            className={`mt-1.5 block text-[10px] font-semibold leading-tight ${
               captionTone === "good"
                 ? "dashboard-status-good"
                 : "dashboard-status-behind"

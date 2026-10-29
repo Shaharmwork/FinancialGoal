@@ -1,161 +1,168 @@
 'use client'
 
 import Image from 'next/image'
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { FieldLabel, GhostButton, GoldButton, inputClassName, Notice, Panel } from '@/components/ui/kit'
+import { registerWithEmailPassword, resendConfirmationEmail, sendPasswordReset, updateAccountPassword } from '@/lib/supabase'
+import { authErrorMessage, MIN_PASSWORD_LENGTH, passwordError } from '@/lib/registration'
 import OwlIcon from '@/src/assets/web/icons/Owlicon.png'
 
+type Mode = 'signin' | 'signup' | 'confirm' | 'forgot'
 interface LoginFormProps {
   errorMessage: string
   isBusy: boolean
   isConfigured: boolean
-  onSubmit: (email: string, password: string) => Promise<void>
+  onSubmit: (email: string, password: string) => Promise<void | "confirmation-required">
+  linkError?: string
 }
 
-export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit }: LoginFormProps) {
+export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit, linkError = '' }: LoginFormProps) {
+  const [mode, setMode] = useState<Mode>('signin')
   const [email, setEmail] = useState('')
+  const [name, setName] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-
-  const handleTogglePassword = () => {
-    if (!isConfigured || isBusy) {
-      return
-    }
-
-    setShowPassword((currentValue) => {
-      return !currentValue
-    })
+  const [working, setWorking] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [cooldown, setCooldown] = useState(0)
+  const [hideLinkError, setHideLinkError] = useState(false)
+  const lock = useRef(false)
+  const busy = isBusy || working
+  const disabled = !isConfigured || busy
+  useEffect(() => {
+    if (cooldown <= 0) return
+    const timer = window.setTimeout(() => setCooldown(value => Math.max(0, value - 1)), 1000)
+    return () => window.clearTimeout(timer)
+  }, [cooldown])
+  const changeMode = (next: Mode) => {
+    if (busy) return
+    setMode(next); setError(''); setNotice(''); setPassword(''); setConfirmation(''); setShowPassword(false); setHideLinkError(true)
   }
-
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-
-    if (!isConfigured || isBusy) {
-      return
+    if (disabled || lock.current || ((mode === 'confirm' || mode === 'forgot') && cooldown > 0)) return
+    setError(''); setNotice('')
+    if (mode === 'signup') {
+      const message = passwordError(password, confirmation)
+      if (message) { setError(message); return }
     }
-
-    await onSubmit(email.trim(), password)
+    lock.current = true; setWorking(true)
+    try {
+      if (mode === 'signin') {
+        const result = await onSubmit(email.trim(), password)
+        if (result === 'confirmation-required') {
+          setMode('confirm'); setPassword(''); setConfirmation(''); setShowPassword(false)
+          setNotice('Your email is not confirmed yet. Check your inbox and spam/junk folder for the confirmation link, or request a new one below.')
+        }
+      }
+      if (mode === 'signup') {
+        const data = await registerWithEmailPassword(email.trim(), password, name.trim())
+        setPassword(''); setConfirmation(''); setShowPassword(false)
+        if (!data.session) {
+          setMode('confirm'); setCooldown(60)
+          setNotice('Check your inbox and spam/junk folder for a confirmation link. If this email already has an account, sign in instead.')
+        }
+      }
+      if (mode === 'confirm') {
+        await resendConfirmationEmail(email.trim())
+        setCooldown(60)
+        setNotice('If confirmation is needed for this address, a new link has been requested. Check your inbox and spam/junk folder, and use the newest email.')
+      }
+      if (mode === 'forgot') {
+        await sendPasswordReset(email.trim())
+        setCooldown(60)
+        setNotice('Reset request submitted. If this email belongs to an account, look for a password-reset email from FinancialGoal. Check your inbox and spam/junk folder, and use the newest link. If it is in spam, mark it as not spam.')
+      }
+    } catch (cause) {
+      const code = (cause as { code?: string })?.code
+      if (mode === 'signup' && ['signup_account_recovery', 'user_already_exists', 'email_exists'].includes(code ?? '')) {
+        setMode('signin'); setPassword(''); setConfirmation(''); setShowPassword(false)
+      }
+      setError(authErrorMessage(cause))
+    }
+    finally { lock.current = false; setWorking(false) }
   }
-
-  return (
-    <div className="space-y-5">
-      <div className="flex flex-col items-center text-center">
-        <span className="relative h-20 w-20">
-          <Image alt="" className="object-contain" fill priority sizes="80px" src={OwlIcon} />
-        </span>
-        <h1 className="dashboard-gold-title mt-3 text-[28px] font-bold">Financial Goal</h1>
-        <p className="mt-1 text-sm text-[#b0947a]">Your freelance hours, income and tax reserve.</p>
+  const visibleError = error || (mode === 'signin' ? errorMessage : '') || (!hideLinkError ? linkError : '')
+  const title = { signin: 'Welcome back', signup: 'Step 1 · Create your account', confirm: 'Step 2 · Confirm your email', forgot: 'Reset your password' }[mode]
+  return <div className="space-y-5">
+    <header className="flex flex-col items-center text-center">
+      <span className="relative h-20 w-20"><Image alt="" className="object-contain" fill priority sizes="80px" src={OwlIcon}/></span>
+      <h1 className="dashboard-gold-title mt-3 text-[28px] font-bold">Financial Goal</h1>
+      <p className="mt-2 text-sm text-[#b0947a]">Your freelance work. A clearer financial future.</p>
+    </header>
+    <Panel title={title}>
+      {mode === 'signup' ? <p className="mb-5 text-sm leading-relaxed text-[#c9af91]">Create an account, confirm your email, then build your personal plan one step at a time. Made for Dutch freelancers, with amounts in euros.</p> : null}
+      {mode === 'confirm' ? <p className="mb-5 text-sm leading-relaxed text-[#c9af91]">Open the confirmation link in your email to continue to setup. If it has not arrived after a few minutes, check your spam/junk folder and the email address below before requesting another link. If you find it in spam, mark it as not spam.</p> : null}
+      {mode === 'forgot' ? <p className="mb-5 text-sm text-[#c9af91]">Check your email address below, then select Send reset link. Your current password is not needed. No email is requested until you press that button.</p> : null}
+      {visibleError ? <div role="alert" className="mb-4"><Notice title={visibleError} tone="danger"/></div> : null}
+      {notice ? <div role="status" className="mb-4"><Notice title={notice} tone="info"/></div> : null}
+      <form className="relative space-y-4" onSubmit={submit}>
+        {mode === 'signup' ? <label className="block"><FieldLabel>Your name (optional)</FieldLabel>
+          <input className={inputClassName(false, "text-base")} autoComplete="given-name" maxLength={60} disabled={disabled} value={name} onChange={event => setName(event.target.value)}/>
+          <span className="mt-1 block text-xs text-[#b0947a]">Used in your dashboard greeting. Leave blank for a greeting without a name.</span></label> : null}
+        <label className="block"><FieldLabel>Email address</FieldLabel>
+          <input required type="email" autoComplete="email" autoCapitalize="none" spellCheck={false} className={inputClassName(false, "text-base")} disabled={disabled}
+            value={email} onChange={event => setEmail(event.target.value)}/></label>
+        {mode === 'signin' || mode === 'signup' ? <>
+          <label className="block" htmlFor="auth-password"><FieldLabel>Password</FieldLabel></label>
+          <div className="flex gap-2">
+            <input id="auth-password" required autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} type={showPassword ? 'text' : 'password'}
+              minLength={mode === 'signup' ? MIN_PASSWORD_LENGTH : undefined} className={inputClassName(false,'min-w-0 flex-1 text-base')} disabled={disabled} value={password} onChange={event => setPassword(event.target.value)}/>
+            <GhostButton aria-pressed={showPassword} disabled={disabled} onClick={() => setShowPassword(!showPassword)}>{showPassword ? 'Hide' : 'Show'}</GhostButton>
+          </div>
+          {mode === 'signup' ? <>
+            <p className="text-sm text-[#b0947a]">Use at least 10 characters. A long, unique phrase works well.</p>
+            <label className="block"><FieldLabel>Confirm password</FieldLabel>
+              <input required autoComplete="new-password" type={showPassword ? 'text' : 'password'} className={inputClassName(false, "text-base")} disabled={disabled}
+                value={confirmation} onChange={event => setConfirmation(event.target.value)}/></label>
+          </> : null}
+        </> : null}
+        <GoldButton className="w-full" type="submit" disabled={disabled || ((mode === 'confirm' || mode === 'forgot') && cooldown > 0)}>
+          {busy ? 'Please wait…' : (mode === 'confirm' || mode === 'forgot') && cooldown > 0 ? `Try again in ${cooldown}s` : {signin:'Sign in', signup:'Create account', confirm:'Resend confirmation', forgot:'Send reset link'}[mode]}
+        </GoldButton>
+        {!isConfigured ? <p role="alert" className="text-sm text-[#ffb4a7]">Account services are unavailable. Please contact the app owner.</p> : null}
+      </form>
+      <div className="relative mt-5 flex flex-wrap justify-center gap-2 border-t border-[#a8744a]/25 pt-4">
+        {mode === 'signin' ? <>
+          <GhostButton disabled={busy} onClick={() => changeMode('signup')}>Create an account</GhostButton>
+          <GhostButton disabled={busy} onClick={() => changeMode('forgot')}>Forgot password?</GhostButton>
+        </> : <GhostButton disabled={busy} onClick={() => changeMode('signin')}>Back to sign in</GhostButton>}
       </div>
-
-      <Panel title="Sign in">
-        {errorMessage ? (
-          <div aria-live="polite" className="mb-4">
-            <Notice title={errorMessage} tone="danger" />
-          </div>
-        ) : null}
-
-        <form className="space-y-4" onSubmit={handleSubmit} suppressHydrationWarning>
-          <label className="block">
-            <FieldLabel>Email</FieldLabel>
-            <input
-              autoComplete="email"
-              className={inputClassName()}
-              disabled={!isConfigured || isBusy}
-              onChange={(event) => setEmail(event.target.value)}
-              suppressHydrationWarning
-              type="email"
-              value={email}
-            />
-          </label>
-
-          <div className="block">
-            <label htmlFor="login-password">
-              <FieldLabel>Password</FieldLabel>
-            </label>
-            <div className="flex items-center gap-2">
-              <input
-                id="login-password"
-                autoComplete="current-password"
-                className={inputClassName(false, 'flex-1')}
-                disabled={!isConfigured || isBusy}
-                onChange={(event) => setPassword(event.target.value)}
-                suppressHydrationWarning
-                type={showPassword ? 'text' : 'password'}
-                value={password}
-              />
-              <GhostButton
-                aria-label={showPassword ? 'Hide password' : 'Show password'}
-                aria-pressed={showPassword}
-                className="shrink-0 px-3"
-                disabled={!isConfigured || isBusy}
-                onClick={handleTogglePassword}
-              >
-                {showPassword ? <EyeOffIcon /> : <EyeIcon />}
-              </GhostButton>
-            </div>
-          </div>
-
-          <GoldButton className="w-full" disabled={!isConfigured || isBusy} type="submit">
-            {isBusy ? 'Signing in…' : 'Sign in'}
-          </GoldButton>
-
-          {!isConfigured ? (
-            <p className="text-sm text-[#a88c71]">
-              Add your Supabase URL and anon key to `.env.local` first.
-            </p>
-          ) : null}
-        </form>
-      </Panel>
-    </div>
-  )
+    </Panel>
+    {mode === 'signup' ? <p className="text-center text-xs text-[#b0947a]">Account → Email confirmation → Personal setup → Dashboard</p> : null}
+  </div>
 }
 
-function EyeIcon() {
-  return (
-    <svg aria-hidden="true" className="h-5 w-5" fill="none" viewBox="0 0 24 24">
-      <path
-        d="M2.7 12c1.8-3.2 5-5.2 9.3-5.2s7.5 2 9.3 5.2c-1.8 3.2-5 5.2-9.3 5.2S4.5 15.2 2.7 12Z"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.7"
-      />
-      <circle cx="12" cy="12" r="2.7" stroke="currentColor" strokeWidth="1.7" />
-    </svg>
-  )
-}
-
-function EyeOffIcon() {
-  return (
-    <svg aria-hidden="true" className="h-5 w-5" fill="none" viewBox="0 0 24 24">
-      <path
-        d="M3.5 3.5 20.5 20.5"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.7"
-      />
-      <path
-        d="M10.7 6.9A10.6 10.6 0 0 1 12 6.8c4.3 0 7.5 2 9.3 5.2a11 11 0 0 1-4 4.1"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.7"
-      />
-      <path
-        d="M8.9 8.1A11 11 0 0 0 2.7 12c1.8 3.2 5 5.2 9.3 5.2 1 0 2-.1 2.9-.4"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.7"
-      />
-      <path
-        d="M10.4 10.4A2.7 2.7 0 0 0 12 14.7"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.7"
-      />
-    </svg>
-  )
+export function PasswordResetForm({ onComplete, onCancel }: { onComplete: () => void; onCancel: () => void }) {
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [show, setShow] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const lock = useRef(false)
+  return <main className="mx-auto flex min-h-[100dvh] max-w-lg flex-col justify-center p-5">
+    <h1 className="dashboard-gold-title mb-5 text-3xl font-bold">Choose a new password</h1>
+    <Panel>
+      <form className="relative space-y-4" onSubmit={async event => {
+        event.preventDefault()
+        if (lock.current) return
+        const message = passwordError(password, confirmation)
+        if (message) { setError(message); return }
+        lock.current = true; setBusy(true); setError('')
+        try { await updateAccountPassword(password); setPassword(''); setConfirmation(''); onComplete() }
+        catch (cause) { setError(authErrorMessage(cause)) }
+        finally { lock.current = false; setBusy(false) }
+      }}>
+        <p className="text-sm text-[#b0947a]">Use at least 10 characters, different from your old password.</p>
+        <label className="block"><FieldLabel>New password</FieldLabel><input required autoComplete="new-password" minLength={MIN_PASSWORD_LENGTH} type={show ? 'text' : 'password'} className={inputClassName(false, "text-base")} value={password} disabled={busy} onChange={event => setPassword(event.target.value)}/></label>
+        <label className="block"><FieldLabel>Confirm new password</FieldLabel><input required autoComplete="new-password" type={show ? 'text' : 'password'} className={inputClassName(false, "text-base")} value={confirmation} disabled={busy} onChange={event => setConfirmation(event.target.value)}/></label>
+        <GhostButton disabled={busy} aria-pressed={show} onClick={() => setShow(!show)}>{show ? 'Hide passwords' : 'Show passwords'}</GhostButton>
+        {error ? <p role="alert" className="text-sm text-[#ffb4a7]">{error}</p> : null}
+        <GoldButton disabled={busy} className="w-full" type="submit">{busy ? 'Updating…' : 'Update password'}</GoldButton>
+        <GhostButton disabled={busy} className="w-full" onClick={onCancel}>Cancel and sign out</GhostButton>
+      </form>
+    </Panel>
+  </main>
 }

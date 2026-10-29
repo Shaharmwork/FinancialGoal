@@ -12,7 +12,9 @@ import {
   type DailyLogNavigationHandlers,
 } from "@/components/daily-log";
 import { Dashboard } from "@/components/dashboard";
-import { LoginForm } from "@/components/login-form";
+import { LoginForm, PasswordResetForm } from "@/components/login-form";
+import { Onboarding } from "@/components/onboarding";
+import { authErrorMessage } from "@/lib/registration";
 import { PhoneStage } from "@/components/phone-stage";
 import { Toast } from "@/components/ui/kit";
 import { WarningModal } from "@/components/warning-modal";
@@ -239,6 +241,10 @@ export default function Home() {
   const [dashboardAlertPulseSessionKey, setDashboardAlertPulseSessionKey] =
     useState<string | undefined>(undefined);
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
+  const [authLinkError, setAuthLinkError] = useState("");
+
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [isSignOutConfirmOpen, setIsSignOutConfirmOpen] = useState(false);
   const [isUnsavedReportModalOpen, setIsUnsavedReportModalOpen] =
@@ -314,6 +320,15 @@ export default function Home() {
   useEffect(() => {
     let isActive = true;
     let hasResolvedSession = false;
+    const callbackUrl = new URL(window.location.href);
+    const hash = new URLSearchParams(callbackUrl.hash.slice(1));
+    if (hash.has("error") || callbackUrl.searchParams.has("error")) {
+      setAuthLinkError("This email link has expired or is invalid. Try signing in to continue email confirmation, or choose Forgot password for a new reset link.");
+      callbackUrl.hash = "";
+      ["error", "error_code", "error_description"].forEach(key => callbackUrl.searchParams.delete(key));
+      window.history.replaceState(null, "", callbackUrl.pathname + callbackUrl.search);
+    }
+
 
     if (!hasSupabaseConfig()) {
       setHasCheckedSession(true);
@@ -345,6 +360,9 @@ export default function Home() {
 
         hasResolvedSession = true;
         window.clearTimeout(fallbackTimer);
+        try {
+          if (currentSession && sessionStorage.getItem("financial-goal-password-recovery") === currentSession.user.id) setIsPasswordRecovery(true);
+        } catch { /* session storage is optional */ }
         setSession((previousSession) =>
           keepSessionForSameUser(previousSession, currentSession),
         );
@@ -365,13 +383,18 @@ export default function Home() {
         setHasCheckedSession(true);
       });
 
-    const unsubscribe = onSupabaseAuthStateChange((_event, nextSession) => {
+    const unsubscribe = onSupabaseAuthStateChange((event, nextSession) => {
       if (!isActive) {
         return;
       }
 
       hasResolvedSession = true;
       window.clearTimeout(fallbackTimer);
+      if (event === "PASSWORD_RECOVERY" && nextSession) {
+        setIsPasswordRecovery(true);
+        try { sessionStorage.setItem("financial-goal-password-recovery", nextSession.user.id); } catch { /* optional */ }
+      }
+      if (!nextSession) setIsPasswordRecovery(false);
       // Supabase re-emits SIGNED_IN / TOKEN_REFRESHED when the tab regains
       // focus. Keep the same session object for the same user so the data
       // reload effects don't re-run and reset the screen (and its scroll).
@@ -420,7 +443,8 @@ export default function Home() {
         setHasHydratedReportOverlay(true);
         setMonthlySummaries(remoteData.monthlySummaries);
         setSettings(remoteData.settings);
-        setDisplayName(remoteData.displayName);
+        setNeedsOnboarding(remoteData.isNewUser);
+        setDisplayName(remoteData.displayName?.trim() || (typeof session.user.user_metadata?.display_name === "string" ? session.user.user_metadata.display_name.trim() || undefined : undefined));
         setIsReportsAlertDismissedForSession(false);
         setLoadedRemoteUserId(userId);
         setHasLoadedRemoteState(true);
@@ -462,6 +486,7 @@ export default function Home() {
       setMonthlySummaries(starterStoredState.monthlySummaries);
       setSettings(starterStoredState.settings);
       setDisplayName(undefined);
+      setNeedsOnboarding(false);
       setHasLoadedRemoteState(false);
       setHasHydratedReportOverlay(false);
       setHasUnsavedReportFieldDrafts(false);
@@ -1132,6 +1157,9 @@ export default function Home() {
     try {
       await signInWithEmailPassword(email, password);
     } catch (error) {
+      if ((error as { code?: string })?.code === "email_not_confirmed") {
+        return "confirmation-required" as const;
+      }
       console.error("[Financial Goal] Sign in failed.", error);
       const nextMessage = getSignInErrorMessage(error);
       setToastErrorMessage(nextMessage);
@@ -1156,6 +1184,8 @@ export default function Home() {
 
     try {
       await signOutFromSupabase();
+      setIsPasswordRecovery(false);
+      try { sessionStorage.removeItem("financial-goal-password-recovery"); } catch { /* optional */ }
       clearBrowserSessionState();
       setSession(null);
       setHasLoadedRemoteState(false);
@@ -1248,6 +1278,34 @@ export default function Home() {
     };
   }, [toastErrorMessage]);
 
+  if (session && isPasswordRecovery) {
+    return <><PasswordResetForm
+      onComplete={() => {
+        setIsPasswordRecovery(false);
+        try { sessionStorage.removeItem("financial-goal-password-recovery"); } catch { /* optional */ }
+        showSuccess("Password updated.");
+      }}
+      onCancel={() => { void handleSignOut(); }}
+    /><Toast message={toastErrorMessage} onDismiss={() => setToastErrorMessage("")} tone="error" /></>;
+  }
+
+  if (session && hasLoadedRemoteState && loadedRemoteUserId === session.user.id && needsOnboarding) {
+    return <><Onboarding key={session.user.id} userId={session.user.id}
+      onSignOut={() => { void handleSignOut(); }}
+      onSave={async nextSettings => {
+        const result = await handleSaveConfiguration(nextSettings, monthlySummariesRef.current);
+        if (result.status === "error") throw new Error(result.message);
+        if (result.status === "conflict") throw new Error("Your settings were saved in another tab or device. Refresh to load them before continuing.");
+      }}
+      onComplete={destination => {
+        setNeedsOnboarding(false);
+        if (destination === "history") handleAddPreviousMonths();
+        else setCurrentScreen(destination);
+        showSuccess("Your setup is saved. Welcome to Financial Goal.");
+      }}
+    /><Toast message={toastErrorMessage} onDismiss={() => setToastErrorMessage("")} tone="error" /></>;
+  }
+
   if (!session) {
     return (
       <div className="relative isolate min-h-screen overflow-x-hidden text-foreground">
@@ -1260,9 +1318,10 @@ export default function Home() {
           <section className="w-full">
             <LoginForm
               errorMessage={toastErrorMessage}
-              isBusy={isSigningIn}
+              isBusy={isSigningIn || !hasCheckedSession}
               isConfigured={isConfigured}
               onSubmit={handleSignIn}
+              linkError={authLinkError}
             />
           </section>
         </main>
@@ -1587,40 +1646,5 @@ function formatConflictDate(dateKey: string) {
 }
 
 function getSignInErrorMessage(error: unknown) {
-  const rawMessage = getErrorMessage(error, "").toLowerCase();
-
-  if (
-    rawMessage.includes("invalid login credentials") ||
-    rawMessage.includes("email not confirmed") ||
-    rawMessage.includes("invalid credentials")
-  ) {
-    return "Invalid login credentials. Check your email and password.";
-  }
-
-  if (
-    rawMessage.includes("failed to fetch") ||
-    rawMessage.includes("fetch failed") ||
-    rawMessage.includes("network") ||
-    rawMessage.includes("load failed")
-  ) {
-    return "Network error. Supabase auth service is unavailable or unreachable.";
-  }
-
-  if (
-    rawMessage.includes("session") ||
-    rawMessage.includes("refresh token") ||
-    rawMessage.includes("jwt")
-  ) {
-    return "Session error. Clear the saved session and sign in again.";
-  }
-
-  if (
-    rawMessage.includes("supabase") ||
-    rawMessage.includes("auth") ||
-    rawMessage.includes("service unavailable")
-  ) {
-    return "Supabase auth service is unavailable. Check your auth configuration and try again.";
-  }
-
-  return `Unknown sign-in error.${rawMessage ? ` ${getErrorMessage(error, "")}` : ""}`.trim();
+  return authErrorMessage(error);
 }

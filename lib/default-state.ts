@@ -29,8 +29,8 @@ export const emptySettings: Settings = {
   defaultShiftHours: null,
   weeklyHoursTarget: null,
   reserveBufferPercent: null,
-  qualifiesForSelfEmployedDeduction: null,
-  qualifiesForStartersDeduction: null,
+  qualifiesForSelfEmployedDeduction: false,
+  qualifiesForStartersDeduction: false,
   vacationDaysPerYear: null,
 }
 
@@ -164,8 +164,8 @@ export function normalizeSettings(value: unknown): Settings {
     reserveBufferPercent: readNullableNumber(value.reserveBufferPercent),
     qualifiesForSelfEmployedDeduction: readNullableBoolean(
       value.qualifiesForSelfEmployedDeduction,
-    ),
-    qualifiesForStartersDeduction: readNullableBoolean(value.qualifiesForStartersDeduction),
+    ) ?? false,
+    qualifiesForStartersDeduction: readNullableBoolean(value.qualifiesForStartersDeduction) ?? false,
     ...(readString(value.updatedAt) ? { updatedAt: readString(value.updatedAt) } : {}),
     vacationDaysPerYear: readNullableNumber(value.vacationDaysPerYear),
   }

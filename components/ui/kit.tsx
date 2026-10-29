@@ -119,7 +119,7 @@ export function FieldLabel({
   return (
     <span className="mb-1.5 flex min-h-5 items-center justify-between gap-2">
       <span className="flex min-w-0 items-center gap-1.5">
-        <span className="truncate text-[11px] font-semibold uppercase tracking-[0.12em] text-[#c9a57f]">
+        <span className="break-words text-[11px] font-semibold uppercase tracking-[0.12em] text-[#c9a57f]">
           {children}
         </span>
         {info ? <InfoHelp body={info.body} title={info.title} /> : null}

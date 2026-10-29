@@ -55,11 +55,13 @@ export function InfoHelp({ body, title }: InfoHelpProps) {
         ? createPortal(
             <div
               aria-modal="true"
+              aria-labelledby={titleId}
               className="fixed inset-0 z-[2147483647] flex items-end justify-center bg-black/65 px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-6 backdrop-blur-[2px] sm:items-center"
               role="dialog"
               onClick={() => setIsOpen(false)}
             >
               <div
+                style={{ maxHeight: 'calc(100dvh - 4rem)', overflowY: 'auto' }}
                 className="w-full max-w-sm rounded-[22px] border border-[#a8744a]/55 bg-[linear-gradient(180deg,#261c15_0%,#140f0b_100%)] p-5 shadow-[0_24px_48px_rgba(0,0,0,0.6)]"
                 onClick={(event) => event.stopPropagation()}
               >
