@@ -1,3 +1,4 @@
+import { getSettingsForYear, yearFields } from './year-settings'
 import { getEntryHours, getEntryInvoicedIncome, sortMonthlySummaries } from './calculations'
 import {
   normalizeEntry,
@@ -22,6 +23,8 @@ export interface LoadedRemoteAppData extends RemoteAppData {
 }
 
 interface AppSettingsRow {
+  yearly_settings?: Record<string, Settings>
+  legacy_year?: number
   target_net_month?: number | null
   weekly_hours_target?: number | null
   default_shift_income?: number | null
@@ -89,7 +92,7 @@ interface RpcResult {
   settings?: AppSettingsRow
 }
 
-// The save functions come from supabase/migrations/20261028_safe_saving.sql.
+// The save functions come from supabase/migrations/20261028000000_safe_saving.sql.
 export class DatabaseUpdateRequiredError extends Error {
   constructor() {
     super('The database needs an update before changes can be saved. Nothing was changed.')
@@ -131,7 +134,8 @@ function mapSettingsFromRow(row: AppSettingsRow | null): Settings {
     return starterStoredState.settings
   }
 
-  return normalizeSettings({
+  const legacy = normalizeSettings({
+    year: row.legacy_year ?? 2026,
     defaultShiftHours: row.default_shift_hours,
     defaultShiftIncome: row.default_shift_income,
     qualifiesForSelfEmployedDeduction: row.qualifies_for_self_employed_deduction,
@@ -143,20 +147,12 @@ function mapSettingsFromRow(row: AppSettingsRow | null): Settings {
     vacationDaysPerYear: row.vacation_days_per_year,
     weeklyHoursTarget: row.weekly_hours_target,
   })
-}
-
-function mapSettingsToPayload(settings: Settings) {
-  return {
-    default_shift_hours: settings.defaultShiftHours,
-    default_shift_income: settings.defaultShiftIncome,
-    qualifies_for_self_employed_deduction: settings.qualifiesForSelfEmployedDeduction,
-    qualifies_for_starters_deduction: settings.qualifiesForStartersDeduction,
-    reserve_buffer_percent: settings.reserveBufferPercent,
-    spouse_monthly_income: settings.spouseMonthlyIncome,
-    target_net_month: settings.targetNetMonth,
-    vacation_days_per_year: settings.vacationDaysPerYear,
-    weekly_hours_target: settings.weeklyHoursTarget,
+  const yearlySettings = {
+    ...((legacy.targetNetMonth ?? 0) > 0 || !Object.keys(row.yearly_settings ?? {}).length
+      ? { [String(legacy.year)]: yearFields(legacy) } : {}),
+    ...row.yearly_settings,
   }
+  return getSettingsForYear({ ...legacy, year: -1, yearlySettings }, new Date().getFullYear())
 }
 
 function hasAnyUserData({
@@ -376,10 +372,11 @@ export async function saveSettingsRemote(
   expectedUpdatedAt: string | null,
   mutationId: string,
 ): Promise<MutationOutcome<Settings>> {
-  const result = await callSaveFunction('save_settings', {
+  const result = await callSaveFunction('save_year_settings', {
+    p_year: settings.year ?? new Date().getFullYear(),
     p_expected_updated_at: expectedUpdatedAt,
     p_mutation_id: mutationId,
-    p_settings: mapSettingsToPayload(settings),
+    p_settings: yearFields(settings),
   })
 
   return result.status === 'saved' && result.settings

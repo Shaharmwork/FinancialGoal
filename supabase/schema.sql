@@ -333,4 +333,8 @@ to authenticated
 using (auth.uid() = id);
 
 -- Safe saving across devices (version-checked save functions): run
--- supabase/migrations/20261028_safe_saving.sql after this file.
+-- supabase/migrations/20261028000000_safe_saving.sql after this file.
+
+-- Annual configuration and opt-in holiday calendar: then run
+-- supabase/migrations/20261029103253_yearly_settings_holiday_consent.sql.
+-- Finally run 20261029105253_restrict_year_settings_rpc_access.sql.

@@ -56,7 +56,9 @@ export interface MonthlySummary {
   updatedAt?: string
 }
 
-export interface Settings {
+export interface YearSettings {
+  dutchHolidaysEnabled?: boolean
+  holidayDaysAdded?: number
   targetNetMonth: number | null
   spouseMonthlyIncome: number
   defaultShiftIncome: number | null
@@ -66,7 +68,12 @@ export interface Settings {
   qualifiesForSelfEmployedDeduction: boolean | null
   qualifiesForStartersDeduction: boolean | null
   vacationDaysPerYear: number | null
-  // Version of the saved settings row; absent before the first save.
+}
+
+export interface Settings extends YearSettings {
+  year?: number
+  yearlySettings?: Record<string, YearSettings>
+  // One version guards the whole configuration document across devices.
   updatedAt?: string
 }
 

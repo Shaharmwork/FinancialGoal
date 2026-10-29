@@ -4,6 +4,7 @@ import {
   isSupportedTaxYear,
 } from './tax-engine'
 import { defaultSettings } from './default-state'
+import { getSettingsForYear, isAutomaticHoliday } from './year-settings'
 import type { DailyEntry, MonthlySummary, Settings } from './types'
 
 function roundCurrency(value: number) {
@@ -76,23 +77,9 @@ function isWeekday(date: Date) {
   return day !== 0 && day !== 6
 }
 
-const publicHolidayKeysByYear = new Map<number, Set<string>>()
-
-function isPublicHoliday(date: Date) {
-  const year = date.getFullYear()
-  let holidayKeys = publicHolidayKeysByYear.get(year)
-
-  if (!holidayKeys) {
-    holidayKeys = new Set(getDutchPublicHolidayWeekdays(year).map(toDateKey))
-    publicHolidayKeysByYear.set(year, holidayKeys)
-  }
-
-  return holidayKeys.has(toDateKey(date))
-}
-
-// A day that should have a report: a weekday that isn't a Dutch public holiday.
+// Holiday consent creates visible vacation entries; unreported weekdays remain missing.
 function isExpectedWorkday(date: Date) {
-  return isWeekday(date) && !isPublicHoliday(date)
+  return isWeekday(date)
 }
 
 function getHandledDateKeys(entries: DailyEntry[], extraHandledDateKeys: Iterable<string> = []) {
@@ -216,7 +203,7 @@ export function getMissingPreviousMonthSummaryKeys(
   )
   const reportedMonthKeys = new Set(
     entries
-      .filter((entry) => entry.date.startsWith(`${currentYear}-`))
+      .filter((entry) => !isAutomaticHoliday(entry) && entry.date.startsWith(`${currentYear}-`))
       .map((entry) => entry.date.slice(0, 7)),
   )
 
@@ -243,6 +230,25 @@ export function getEarliestMissingPreviousMonthWeekday(
   )
 }
 
+// Keep earlier years available if the user joined then or already has data.
+// New accounts cannot wander into empty years before their reporting history.
+export function getEarliestReportingYear(
+  entries: DailyEntry[],
+  monthlySummaries: MonthlySummary[],
+  today = new Date(),
+  accountCreatedAt?: string,
+) {
+  const currentYear = today.getFullYear()
+  const joinedYear = accountCreatedAt ? new Date(accountCreatedAt).getFullYear() : currentYear
+  const years = [
+    currentYear,
+    joinedYear,
+    ...entries.map((entry) => Number(entry.date.slice(0, 4))),
+    ...monthlySummaries.map((summary) => Number(summary.monthKey.slice(0, 4))),
+  ].filter((year) => Number.isInteger(year) && year >= 1900 && year <= currentYear)
+  return Math.min(...years)
+}
+
 export function getMissingReportDateKeys(
   entries: DailyEntry[],
   monthlySummaries: MonthlySummary[],
@@ -262,7 +268,7 @@ export function getMissingReportDateKeys(
   const handledDateKeys = getHandledDateKeys(entries, extraHandledDateKeys)
   // Same rule as the totals (getMonthTotals): once a month has daily entries, those
   // entries replace its summary, so the summary no longer covers the missing days.
-  const dailyEntryMonthKeys = new Set(entries.map((entry) => entry.date.slice(0, 7)))
+  const dailyEntryMonthKeys = new Set(entries.filter((entry) => !isAutomaticHoliday(entry)).map((entry) => entry.date.slice(0, 7)))
   const cursor = new Date(currentYear, 0, 1)
   const missingDateKeys: string[] = []
 
@@ -317,7 +323,7 @@ export function getMissingFullReportMonthKeys(
   const summaryMonthKeys = getSummaryMonthKeys(monthlySummaries, currentYear)
   const handledMonthKeys = new Set<string>()
 
-  getHandledDateKeys(entries, extraHandledDateKeys).forEach((dateKey) => {
+  getHandledDateKeys(entries.filter((entry) => !isAutomaticHoliday(entry)), extraHandledDateKeys).forEach((dateKey) => {
     if (dateKey.startsWith(`${currentYear}-`)) {
       handledMonthKeys.add(dateKey.slice(0, 7))
     }
@@ -372,7 +378,7 @@ export function isCurrentMonthIncomplete(entries: DailyEntry[], today = new Date
   return !getCurrentMonthWeekdayCoverage(entries, today).complete
 }
 
-export function getEarliestMissingCurrentMonthWeekday(
+export function getMissingCurrentMonthReportDateKeys(
   entries: DailyEntry[],
   today = new Date(),
   monthlySummaries: MonthlySummary[] = [],
@@ -382,23 +388,28 @@ export function getEarliestMissingCurrentMonthWeekday(
   const isEmploymentMonth = monthlySummaries.some(
     (summary) => summary.monthType === 'employment' && summary.monthKey === toMonthKey(today),
   )
+  if (isEmploymentMonth) return []
 
-  if (isEmploymentMonth) {
-    return undefined
-  }
-
+  // Include the whole current month even for an account created today, matching
+  // the report calendar and allowing the user to fill their earlier work days.
   const entryDays = new Set(entries.map((entry) => entry.date))
-  const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate())
+  const cursor = new Date(start)
+  const missing: string[] = []
 
   while (toDateKey(cursor) < todayKey) {
     const dateKey = toDateKey(cursor)
-    if (isExpectedWorkday(cursor) && !entryDays.has(dateKey)) {
-      return dateKey
-    }
+    if (isExpectedWorkday(cursor) && !entryDays.has(dateKey)) missing.push(dateKey)
     cursor.setDate(cursor.getDate() + 1)
   }
+  return missing
+}
 
-  return undefined
+export function getEarliestMissingCurrentMonthWeekday(
+  entries: DailyEntry[],
+  today = new Date(),
+  monthlySummaries: MonthlySummary[] = [],
+) {
+  return getMissingCurrentMonthReportDateKeys(entries, today, monthlySummaries)[0]
 }
 
 export function getSetupCompleteness(
@@ -407,6 +418,7 @@ export function getSetupCompleteness(
   monthlySummaries: MonthlySummary[],
   today = new Date(),
 ): SetupCompleteness {
+  settings = getSettingsForYear(settings, today.getFullYear())
   return {
     baseConfigurationComplete: hasValidBaseConfiguration(settings),
     isUsingStarterBaseSettings: isUsingStarterBaseSettings(settings),
@@ -490,7 +502,7 @@ export function getDutchPublicHolidayWeekdays(year: number) {
     new Date(year, 0, 1),
     addDays(easterSunday, -2),
     addDays(easterSunday, 1),
-    new Date(year, 3, 27),
+    new Date(year, 3, new Date(year, 3, 27).getDay() === 0 ? 26 : 27),
     new Date(year, 4, 5),
     addDays(easterSunday, 39),
     addDays(easterSunday, 50),
@@ -498,7 +510,7 @@ export function getDutchPublicHolidayWeekdays(year: number) {
     new Date(year, 11, 26),
   ]
 
-  return holidays.filter(isWeekday)
+  return holidays.filter(isWeekday).filter((date, index, list) => list.findIndex((other) => toDateKey(other) === toDateKey(date)) === index)
 }
 
 function countYearWeekdays(year: number) {
@@ -516,6 +528,7 @@ export interface PlanningConsistency {
 }
 
 export function getPlanningConsistency(settings: Settings, today = new Date()) {
+  settings = getSettingsForYear(settings, today.getFullYear())
   if (!isSupportedTaxYear(today.getFullYear())) {
     return undefined
   }
@@ -736,7 +749,7 @@ function getMonthTotals(
   monthlySummaries: MonthlySummary[],
   monthKey: string,
 ) {
-  const monthEntries = entries.filter((entry) => entry.date.slice(0, 7) === monthKey)
+  const monthEntries = entries.filter((entry) => !isAutomaticHoliday(entry) && entry.date.slice(0, 7) === monthKey)
 
   // Specific daily entries always win for a month. Manual summaries are only the fallback.
   if (monthEntries.length > 0) {
@@ -927,6 +940,7 @@ export function getCurrentWeekStats(
   settings: Settings,
   today = new Date(),
 ): WeekStats {
+  settings = getSettingsForYear(settings, today.getFullYear())
   const { start, end } = getCurrentWeekRange(today)
   const weekEntries = filterEntriesByRange(entries, start, end)
   const workedWeekEntries = weekEntries.filter((entry) => (entry.dayStatus ?? 'worked') === 'worked')
@@ -952,6 +966,7 @@ export function getCurrentYearStats(
   settings: Settings,
   today = new Date(),
 ): YearStats {
+  settings = getSettingsForYear(settings, today.getFullYear())
   const currentMonthEnd = getCurrentMonthRange(today).end
   const elapsedYearMonths = Math.min(
     12,
@@ -1022,6 +1037,7 @@ export function getCurrentMonthStats(
   settings: Settings,
   today = new Date(),
 ): MonthStats {
+  settings = getSettingsForYear(settings, today.getFullYear())
   const currentMonthTotals = getMonthTotals(entries, monthlySummaries, toMonthKey(today))
   const year = today.getFullYear()
   const completedPreviousMonths = today.getMonth()

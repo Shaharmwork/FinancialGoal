@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { scrollWithinStage } from '@/components/phone-stage'
+import { getSettingsForYear, isAutomaticHoliday } from '@/lib/year-settings'
+import { focusWithinStage, scrollWithinStage } from '@/components/phone-stage'
 import { WarningModal } from '@/components/warning-modal'
 import {
   areWorkItemDraftsEqual,
@@ -29,6 +30,7 @@ import {
 import type { DailyEntry, MonthlySummary, Settings, WorkItem } from '@/lib/types'
 import {
   getEarliestMissingReportWeekday,
+  getEarliestReportingYear,
   getEntryHours,
   getEntryInvoicedIncome,
   getCurrentMonthRange,
@@ -65,13 +67,14 @@ import {
 } from '@/components/ui/kit'
 
 interface DailyLogProps {
+  accountCreatedAt?: string
   entries: DailyEntry[]
   fillMissingDayTargetDateKey?: string
   fillMissingDaysRequest?: number
   hasUnsavedChanges?: boolean
   monthlySummaries: MonthlySummary[]
-  // Resolves true once Supabase confirmed the delete.
-  onDeleteSavedEntryImmediately: (dateKey: string) => Promise<boolean>
+  // Saved reports resolve true once the database confirms deletion; drafts stay local.
+  onDeleteEntryImmediately: (entry: DailyEntry) => Promise<boolean>
   onBackfillMissingMonth?: (monthKey: string) => void
   onDiscardEntries?: () => void
   onRemoveEntryForDate: (dateKey: string) => void
@@ -257,7 +260,7 @@ function getHandledReportDateKeys(
   entries: DailyEntry[],
   drafts: Record<string, DayInputDraft>,
 ) {
-  const handledDateKeys = new Set(entries.map((entry) => entry.date))
+  const handledDateKeys = new Set(entries.filter((entry) => !isAutomaticHoliday(entry)).map((entry) => entry.date))
 
   Object.entries(drafts).forEach(([dateKey, draft]) => {
     if (!isDraftEmpty(draft)) {
@@ -291,6 +294,7 @@ function getFirstMissingWeekdayInWeekForReport(
 }
 
 export function DailyLog({
+  accountCreatedAt,
   entries,
   fillMissingDayTargetDateKey,
   fillMissingDaysRequest = 0,
@@ -298,7 +302,7 @@ export function DailyLog({
   isSaving = false,
   monthlySummaries,
   onBackfillMissingMonth,
-  onDeleteSavedEntryImmediately,
+  onDeleteEntryImmediately,
   onDiscardEntries,
   onRemoveEntryForDate,
   onRegisterNavigationHandlers,
@@ -307,14 +311,17 @@ export function DailyLog({
   onUpsertEntry,
   reportResetRequest = 0,
   savedEntries,
-  settings,
+  settings: allSettings,
   userId,
 }: DailyLogProps) {
   const today = new Date()
   const todayDateKey = toDateKey(today)
+  const earliestYear = getEarliestReportingYear(entries, monthlySummaries, today, accountCreatedAt)
+  const earliestDateKey = `${earliestYear}-01-01`
   const currentMonthKey = toMonthKey(today)
   const currentWeekStartKey = toDateKey(getWeekStart(today))
   const [date, setDate] = useState(todayDateKey)
+  const settings = getSettingsForYear(allSettings, Number(date.slice(0, 4)))
   const [visibleWeekStartKey, setVisibleWeekStartKey] = useState(currentWeekStartKey)
   const [visibleMonthKey, setVisibleMonthKey] = useState(currentMonthKey)
   const [isMonthExpanded, setIsMonthExpanded] = useState(false)
@@ -334,6 +341,7 @@ export function DailyLog({
   const [softWarning, setSoftWarning] = useState<DailySoftWarning | null>(null)
   const [pendingDeleteEntry, setPendingDeleteEntry] = useState<DailyEntry | null>(null)
   const [loadedDayInputDraftsUserId, setLoadedDayInputDraftsUserId] = useState<string | null>(null)
+  const calendarRef = useRef<HTMLElement | null>(null)
   const formRef = useRef<HTMLElement | null>(null)
   const reportListRef = useRef<HTMLElement | null>(null)
   const hoursInputRef = useRef<HTMLInputElement | null>(null)
@@ -415,6 +423,8 @@ export function DailyLog({
     : null
 
   const syncSelectedDate = (nextDateKey: string, collapseMonth = false) => {
+    // Also guard restored selections and the spillover days in January's week.
+    if (nextDateKey < earliestDateKey) nextDateKey = earliestDateKey
     const nextDate = parseDateKey(nextDateKey)
     setDate(nextDateKey)
     setVisibleWeekStartKey(toDateKey(getWeekStart(nextDate)))
@@ -525,20 +535,6 @@ export function DailyLog({
   }, [onUnsavedDayInputDraftsChange])
 
   useEffect(() => {
-    if (!saveToastMessage) {
-      return
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      setSaveToastMessage('')
-    }, 3000)
-
-    return () => {
-      window.clearTimeout(timeoutId)
-    }
-  }, [saveToastMessage, saveToastVersion])
-
-  useEffect(() => {
     if (reportResetRequest <= 0) {
       return
     }
@@ -548,6 +544,7 @@ export function DailyLog({
 
   useEffect(() => {
     if (
+      (userId && loadedDayInputDraftsUserId !== userId) ||
       fillMissingDaysRequest <= 0 ||
       handledFillMissingDaysRequestRef.current === fillMissingDaysRequest
     ) {
@@ -567,16 +564,14 @@ export function DailyLog({
       ) ??
       todayDateKey
     syncSelectedDate(targetDateKey, true)
-    scrollWithinStage(formRef.current)
-
     const focusTimeoutId = window.setTimeout(() => {
-      hoursInputRef.current?.focus({ preventScroll: true })
+      focusWithinStage(hoursInputRef.current, calendarRef.current)
     }, 180)
 
     return () => {
       window.clearTimeout(focusTimeoutId)
     }
-  }, [entries, fillMissingDayTargetDateKey, fillMissingDaysRequest, monthlySummaries, todayDateKey])
+  }, [entries, fillMissingDayTargetDateKey, fillMissingDaysRequest, loadedDayInputDraftsUserId, monthlySummaries, todayDateKey, userId])
 
   useEffect(() => {
     const nextDraft = selectedDraft ?? getEntryDraft(selectedEntry)
@@ -637,11 +632,12 @@ export function DailyLog({
       getFirstMissingWeekdayInWeekForReport(nextWeekStartKey, missingReportDateKeys) ??
       nextWeekStartKey
 
-    syncSelectedDate(nextSelectedDateKey)
+    syncSelectedDate(nextSelectedDateKey < earliestDateKey ? earliestDateKey : nextSelectedDateKey)
   }
 
   const handleMonthChange = (delta: number) => {
     const nextMonthKey = shiftMonth(visibleMonthKey, delta)
+    if (nextMonthKey < earliestDateKey.slice(0, 7) || nextMonthKey > currentMonthKey) return
     syncSelectedDate(getDefaultDateForMonth(nextMonthKey, today))
   }
 
@@ -866,7 +862,7 @@ export function DailyLog({
         return
       }
 
-      const draftSaveState = getDailyDraftSaveState(draft, settings)
+      const draftSaveState = getDailyDraftSaveState(draft, getSettingsForYear(allSettings, Number(draftDateKey.slice(0, 4))))
 
       if (draftSaveState.kind === 'invalid') {
         nextInvalidFieldsByDate[draftDateKey] = draftSaveState.invalidFields
@@ -1169,15 +1165,8 @@ export function DailyLog({
 
     setPendingDeleteEntry(null)
     syncSelectedDate(deletedDateKey)
-    if (isSavedEntry) {
-      const wasDeleted = await onDeleteSavedEntryImmediately(deletedDateKey)
-
-      if (!wasDeleted) {
-        return
-      }
-    } else {
-      onRemoveEntryForDate(deletedDateKey)
-    }
+    const wasDeleted = await onDeleteEntryImmediately(pendingDeleteEntry)
+    if (!wasDeleted) return
     setHours('')
     setHourlyRate('')
     setTotalIncome('')
@@ -1268,8 +1257,7 @@ export function DailyLog({
 
     syncSelectedDate(firstMissingDateKey, true)
     window.setTimeout(() => {
-      scrollWithinStage(formRef.current)
-      hoursInputRef.current?.focus({ preventScroll: true })
+      focusWithinStage(hoursInputRef.current, calendarRef.current)
     }, 60)
   }
 
@@ -1390,7 +1378,7 @@ export function DailyLog({
                   : 'border-[#8a603d]/30 bg-[#120d0a] text-[#ead7bd] hover:border-[#e7b277]/50',
           isToday && !isSelected ? 'ring-1 ring-[#e7b277]/80' : '',
         )}
-        disabled={variant === 'month' && !day.isCurrentMonth}
+        disabled={day.key < earliestDateKey || (variant === 'month' && !day.isCurrentMonth)}
         onClick={() => syncSelectedDate(day.key, variant === 'month')}
         type="button"
       >
@@ -1453,7 +1441,7 @@ export function DailyLog({
         secondaryActionLabel="Keep editing"
         title="Discard unsaved reports?"
       />
-      <Toast message={saveToastMessage} onDismiss={() => setSaveToastMessage('')} tone="success" />
+      <Toast key={saveToastVersion} message={saveToastMessage} onDismiss={() => setSaveToastMessage('')} tone="success" />
 
       <div className="space-y-4">
         <ScreenHeader
@@ -1478,10 +1466,19 @@ export function DailyLog({
           />
         </div>
 
-        <Panel>
+        {visibleMonthDate.getFullYear() < today.getFullYear() ? (
+          <Notice title={`Editing ${visibleMonthDate.getFullYear()} history`}>
+            These reports stay in {visibleMonthDate.getFullYear()}. Editing them does not change
+            the {today.getFullYear()} dashboard totals or tax estimate.
+          </Notice>
+        ) : null}
+
+        <Panel panelRef={calendarRef}>
           <div className="flex items-center justify-between gap-3">
             <IconButton
-              disabled={false}
+              disabled={isMonthExpanded
+                ? visibleMonthKey <= earliestDateKey.slice(0, 7)
+                : visibleWeekStartKey <= toDateKey(getWeekStart(parseDateKey(earliestDateKey)))}
               label={isMonthExpanded ? 'Previous month' : 'Previous week'}
               onClick={() => (isMonthExpanded ? handleMonthChange(-1) : handleWeekChange(-1))}
             >
@@ -1573,6 +1570,7 @@ export function DailyLog({
           panelRef={formRef}
           title={selectedDateLabel}
           subtitle={
+            selectedEntry && isAutomaticHoliday(selectedEntry) ? selectedEntry.note :
             isSelectedDayToday
               ? 'Today'
               : isSelectedDayFuture
@@ -1846,7 +1844,7 @@ export function DailyLog({
               : `${monthEntries.length} day${monthEntries.length === 1 ? '' : 's'} · ${formatHours(visibleMonthTotals.hours)} · ${formatCurrencyPrecise(visibleMonthTotals.income)}`
           }
         >
-          {monthEntries.length === 0 ? (
+          {monthEntries.length === 0 || (visibleMonthSummary && monthEntries.every(isAutomaticHoliday)) ? (
             visibleMonthSummary ? (
               <Notice
                 title={
@@ -1857,7 +1855,7 @@ export function DailyLog({
               >
                 {visibleMonthSummary.monthType === 'employment'
                   ? 'This month was set up as an employment month in Configuration.'
-                  : 'This month has no daily reports. Its total is under Configuration → Past months.'}
+                  : 'Income for this month uses the total under Configuration → Past months. Automatic holiday marks do not replace that total.'}
               </Notice>
             ) : (
               <p className="py-4 text-center text-sm text-[#a88c71]">
@@ -1883,14 +1881,15 @@ export function DailyLog({
                   .join(' · ')
 
                 return (
-                  <li key={entry.id}>
+                  <li key={entry.id} className={cx(
+                    'flex min-w-0 items-center rounded-[14px] border pr-1 transition',
+                    isSelected
+                      ? 'border-[#e7b277]/70 bg-[#2a1e15]'
+                      : 'border-[#8a603d]/30 bg-[#120d0a]/80 hover:border-[#e7b277]/45',
+                  )}>
                     <button
-                      className={cx(
-                        'flex w-full min-w-0 items-center gap-3 rounded-[14px] border px-3 py-2.5 text-left transition',
-                        isSelected
-                          ? 'border-[#e7b277]/70 bg-[#2a1e15]'
-                          : 'border-[#8a603d]/30 bg-[#120d0a]/80 hover:border-[#e7b277]/45',
-                      )}
+                      className="flex min-w-0 flex-1 items-center gap-3 rounded-[14px] px-3 py-2.5 text-left transition hover:bg-white/5 disabled:opacity-50"
+                      disabled={isSaving}
                       onClick={() => handleEditEntry(entry)}
                       type="button"
                     >
@@ -1925,13 +1924,21 @@ export function DailyLog({
                         </span>
                       ) : null}
                     </button>
+                    <IconButton
+                      className="h-11 w-11 border-transparent bg-transparent text-[#c49a7a] hover:text-[#ffb2a6]"
+                      disabled={isSaving}
+                      label={`Delete report for ${formatDate(entryDate)}`}
+                      onClick={() => handleRequestDeleteEntry(entry)}
+                    >
+                      <TrashIcon />
+                    </IconButton>
                   </li>
                 )
               })}
             </ul>
           )}
           <div className="mt-4 flex items-center justify-between gap-2 border-t border-[#8a603d]/25 pt-3">
-            <GhostButton onClick={() => showReportsForMonth(-1)} size="sm">
+            <GhostButton disabled={previousMonthKey < earliestDateKey.slice(0, 7)} onClick={() => showReportsForMonth(-1)} size="sm">
               ‹ {getMonthLabel(parseMonthKey(previousMonthKey))}
             </GhostButton>
             {nextMonthKey <= currentMonthKey ? (

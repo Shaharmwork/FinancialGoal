@@ -1,3 +1,4 @@
+import { getDutchPublicHolidayWeekdays } from './calculations'
 import type { Settings } from './types'
 
 export const MIN_PASSWORD_LENGTH = 10
@@ -25,18 +26,18 @@ export function authErrorMessage(error: unknown) {
 
 export type SetupDraft = {
   target: string; spouse: string; hourlyRate: string; shiftHours: string
-  weeklyHours: string; vacation: string; reserve: string; deduction: string; starter: string
+  weeklyHours: string; vacation: string; reserve: string; deduction: string; starter: string; holidays: string
 }
 
 export const initialSetupDraft: SetupDraft = {
   target: '', spouse: '0', hourlyRate: '', shiftHours: '',
-  weeklyHours: '', vacation: '', reserve: '5', deduction: 'no', starter: 'no',
+  weeklyHours: '', vacation: '', reserve: '5', deduction: 'no', starter: 'no', holidays: 'no',
 }
 
 export const setupStepLabels = ['Your goal', 'Your work', 'Tax assumptions', 'Review'] as const
 export const setupFieldSteps: Record<keyof SetupDraft, number> = {
   target: 0, spouse: 0, hourlyRate: 1, shiftHours: 1, weeklyHours: 1,
-  vacation: 1, reserve: 2, deduction: 2, starter: 2,
+  vacation: 1, holidays: 1, reserve: 2, deduction: 2, starter: 2,
 }
 
 export function setupErrors(draft: SetupDraft): Partial<Record<keyof SetupDraft, string>> {
@@ -62,6 +63,9 @@ export function setupErrors(draft: SetupDraft): Partial<Record<keyof SetupDraft,
 export function settingsFromSetup(draft: SetupDraft): Settings {
   if (Object.keys(setupErrors(draft)).length) throw new Error('Complete the highlighted setup fields.')
   return {
+    year: new Date().getFullYear(),
+    dutchHolidaysEnabled: draft.holidays === 'yes',
+    holidayDaysAdded: draft.holidays === 'yes' ? getDutchPublicHolidayWeekdays(new Date().getFullYear()).length : 0,
     targetNetMonth: Number(draft.target), spouseMonthlyIncome: Number(draft.spouse),
     defaultShiftIncome: Math.round(Number(draft.hourlyRate) * Number(draft.shiftHours) * 100) / 100,
     defaultShiftHours: Number(draft.shiftHours), weeklyHoursTarget: Number(draft.weeklyHours),

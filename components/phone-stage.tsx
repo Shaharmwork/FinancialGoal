@@ -159,6 +159,17 @@ export function scrollWithinStage(
   });
 }
 
+// Programmatic shortcuts keep their date/month context visible when focus opens
+// the keyboard. Ordinary taps still center the field as before.
+const focusScrollAnchors = new WeakMap<HTMLElement, HTMLElement>();
+export function focusWithinStage(target: HTMLElement | null, anchor: HTMLElement | null) {
+  if (!target || !anchor) return;
+  focusScrollAnchors.set(target, anchor);
+  target.focus({ preventScroll: true });
+  focusScrollAnchors.delete(target);
+  scrollWithinStage(anchor);
+}
+
 // While typing on a phone: keep the field visible above the keyboard, and report
 // it so the dock can step aside and leave the room for the form.
 function useTypingInStage(enabled: boolean) {
@@ -179,10 +190,11 @@ function useTypingInStage(enabled: boolean) {
         return;
       }
 
+      const anchor = focusScrollAnchors.get(target);
       setIsTyping(true);
       window.clearTimeout(focusTimer);
       focusTimer = window.setTimeout(() => {
-        if (document.activeElement === target) scrollWithinStage(target, "center");
+        if (document.activeElement === target) scrollWithinStage(anchor ?? target, anchor ? "start" : "center");
       }, 300);
     };
 
