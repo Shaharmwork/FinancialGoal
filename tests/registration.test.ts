@@ -75,11 +75,63 @@ describe('Supabase auth requests', () => {
       resend: vi.fn().mockResolvedValue({ error: null }),
       resetPasswordForEmail: vi.fn().mockResolvedValue({ error: null }),
       updateUser: vi.fn().mockResolvedValue({ error: null }),
+      signInWithPassword: vi.fn().mockResolvedValue({ data: { session: { user: { id: 'new' } } }, error: null }),
     }
-    const createClient = vi.fn().mockReturnValue({ auth })
+    const rpc = vi.fn().mockResolvedValue({ data: { status: 'ok', exists: true }, error: null })
+    const createClient = vi.fn().mockReturnValue({ auth, rpc })
     vi.doMock('@supabase/supabase-js', () => ({ createClient }))
-    return { auth, createClient, api: await import('@/lib/supabase') }
+    return { auth, rpc, createClient, api: await import('@/lib/supabase') }
   }
+  it('does not request a reset for a missing account', async () => {
+    const { auth, rpc, api } = await client()
+    rpc.mockResolvedValueOnce({ data: { status: 'ok', exists: false }, error: null })
+    await expect(api.sendPasswordReset('missing@example.com')).rejects.toMatchObject({code:'account_not_found'})
+    expect(auth.resetPasswordForEmail).not.toHaveBeenCalled()
+  })
+  it.each([
+    { data: null, error: { message: 'unavailable' } },
+    { data: null, error: null },
+    { data: { status: 'ok', exists: 'false' }, error: null },
+    { data: { status: 'ok' }, error: null },
+  ])('never treats a broken lookup as a missing account or requests a reset: %j', async result => {
+    const { auth, rpc, api } = await client()
+    rpc.mockResolvedValueOnce(result as never)
+    await expect(api.sendPasswordReset('new@example.com')).rejects.toMatchObject({code:'account_lookup_unavailable'})
+    expect(auth.resetPasswordForEmail).not.toHaveBeenCalled()
+  })
+  it('returns a bounded retry delay and sends no email when throttled', async () => {
+    const { auth, rpc, api } = await client()
+    rpc.mockResolvedValueOnce({ data: { status: 'rate_limited', retry_after: 121 }, error: null } as never)
+    await expect(api.sendPasswordReset('new@example.com')).rejects.toMatchObject({code:'account_lookup_rate_limited', retryAfter:121})
+    expect(auth.resetPasswordForEmail).not.toHaveBeenCalled()
+  })
+  it('does not look up membership on a successful sign-in', async () => {
+    const { rpc, api } = await client()
+    await expect(api.signInWithEmailPassword('new@example.com','right password')).resolves.toHaveProperty('session')
+    expect(rpc).not.toHaveBeenCalled()
+  })
+  it.each([[false, 'account_not_found'], [true, 'incorrect_password']])('explains failed sign-in when membership is %s', async (exists, code) => {
+    const { auth, rpc, api } = await client()
+    auth.signInWithPassword.mockResolvedValueOnce({data:null, error:{code:'invalid_credentials'}} as never)
+    rpc.mockResolvedValueOnce({data:{status:'ok',exists},error:null} as never)
+    await expect(api.signInWithEmailPassword('new@example.com','wrong password')).rejects.toMatchObject({code})
+  })
+  it('retains the original auth error when the lookup is unavailable or throttled', async () => {
+    const { auth, rpc, api } = await client()
+    for (const result of [{data:null,error:{message:'offline'}}, {data:{status:'rate_limited',retry_after:60},error:null}]) {
+      auth.signInWithPassword.mockResolvedValueOnce({data:null, error:{code:'invalid_credentials'}} as never)
+      rpc.mockResolvedValueOnce(result as never)
+      await expect(api.signInWithEmailPassword('new@example.com','wrong password')).rejects.toMatchObject({code:'invalid_credentials'})
+    }
+  })
+  it('does not replace unconfirmed or rate-limited sign-in responses with password errors', async () => {
+    const { auth, rpc, api } = await client()
+    for (const code of ['email_not_confirmed', 'over_request_rate_limit']) {
+      auth.signInWithPassword.mockResolvedValueOnce({data:null, error:{code}} as never)
+      await expect(api.signInWithEmailPassword('new@example.com','password')).rejects.toMatchObject({code})
+    }
+    expect(rpc).not.toHaveBeenCalled()
+  })
   it('supports confirmation-required signup and enables returning email-link sessions', async () => {
     const { auth, api, createClient } = await client()
     const result = await api.registerWithEmailPassword('new@example.com', 'long unique phrase', 'New')

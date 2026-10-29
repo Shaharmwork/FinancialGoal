@@ -139,6 +139,14 @@ export async function signInWithEmailPassword(email: string, password: string) {
   })
 
   if (error) {
+    if (error.code === 'invalid_credentials') {
+      // Only inspect membership after a rejected sign-in. Lookup outages or
+      // throttling must not prevent a correct password from signing in.
+      let exists: boolean | undefined
+      try { exists = await checkAccountEmail(email) } catch { /* retain the original auth error */ }
+      if (exists === false) throw accountError('account_not_found')
+      if (exists === true) throw accountError('incorrect_password')
+    }
     throw error
   }
 
@@ -217,8 +225,31 @@ export async function resendConfirmationEmail(email: string) {
   if (error) throw error
 }
 
+function accountError(code: string, retryAfter?: number) {
+  return Object.assign(new Error(code), { code, retryAfter })
+}
+
+// Only a literal, validated boolean can establish that an account is missing.
+export async function checkAccountEmail(email: string): Promise<boolean> {
+  let result
+  try { result = await requireAuthClient().rpc('check_account_email', { p_email: email.trim() }) }
+  catch { throw accountError('account_lookup_unavailable') }
+  const { data, error } = result
+  if (error) throw accountError('account_lookup_unavailable')
+  if (data?.status === 'rate_limited') {
+    const retryAfter = typeof data.retry_after === 'number' && Number.isFinite(data.retry_after)
+      ? Math.min(3600, Math.max(1, Math.ceil(data.retry_after))) : 60
+    throw accountError('account_lookup_rate_limited', retryAfter)
+  }
+  if (data?.status === 'invalid_email') throw accountError('invalid_email')
+  if (data?.status !== 'ok' || typeof data.exists !== 'boolean') throw accountError('account_lookup_unavailable')
+  return data.exists
+}
+
 export async function sendPasswordReset(email: string) {
-  const { error } = await requireAuthClient().auth.resetPasswordForEmail(email, { redirectTo: authRedirectUrl() })
+  const address = email.trim()
+  if (!await checkAccountEmail(address)) throw accountError('account_not_found')
+  const { error } = await requireAuthClient().auth.resetPasswordForEmail(address, { redirectTo: authRedirectUrl() })
   if (error) throw error
 }
 

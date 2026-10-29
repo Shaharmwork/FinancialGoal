@@ -11,6 +11,15 @@ export function passwordError(password: string, confirmation: string) {
 
 export function authErrorMessage(error: unknown) {
   const code = (error as { code?: string })?.code
+  if (code === 'account_not_found') return 'No account was found for this email address. Check it for typos or create an account.'
+  if (code === 'incorrect_password') return 'An account exists for this email, but the password is incorrect. Try again or reset your password.'
+  if (code === 'invalid_email') return 'Enter a valid email address.'
+  if (code === 'account_lookup_unavailable') return 'We could not check this email right now. No reset email was requested. Please try again shortly.'
+  if (code === 'account_lookup_rate_limited') {
+    const seconds = (error as { retryAfter?: number }).retryAfter
+    const minutes = typeof seconds === 'number' && Number.isFinite(seconds) ? Math.max(1, Math.ceil(seconds / 60)) : 1
+    return `Too many email checks. Please try again in ${minutes === 1 ? 'about a minute' : `about ${minutes} minutes`}. No reset email was requested.`
+  }
   if (code === 'email_not_confirmed') return 'Confirm your email first. You can request another confirmation email below.'
   if (code === 'user_already_exists' || code === 'email_exists') return 'This email is already registered. Sign in or use Forgot password to reset your password.'
   if (code === 'signup_account_recovery') return 'This email may already be registered. Sign in or use Forgot password to reset your password. If you received an invitation, use the link in that email.'
@@ -19,7 +28,7 @@ export function authErrorMessage(error: unknown) {
   if (code === 'email_address_not_authorized') return 'Email delivery is not ready for this address. Please contact the app owner.'
   if (code === 'over_email_send_rate_limit') return 'The app has reached its email-sending limit. Please wait before requesting another email. If this continues, contact the app owner.'
   if (code === 'over_request_rate_limit') return 'Too many requests. Please wait before trying again.'
-  if (code === 'invalid_credentials') return 'The email or password is incorrect.'
+  if (code === 'invalid_credentials') return 'Email or password is incorrect. Check your email for typos, reset your password, or create an account if you haven’t registered yet.'
   if (code === 'same_password') return 'Choose a different password from your current one.'
   return 'We could not complete that request. Check your connection and try again.'
 }

@@ -9,14 +9,13 @@ import OwlIcon from '@/src/assets/web/icons/Owlicon.png'
 
 type Mode = 'signin' | 'signup' | 'confirm' | 'forgot'
 interface LoginFormProps {
-  errorMessage: string
   isBusy: boolean
   isConfigured: boolean
   onSubmit: (email: string, password: string) => Promise<void | "confirmation-required">
   linkError?: string
 }
 
-export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit, linkError = '' }: LoginFormProps) {
+export function LoginForm({ isBusy, isConfigured, onSubmit, linkError = '' }: LoginFormProps) {
   const [mode, setMode] = useState<Mode>('signin')
   const [email, setEmail] = useState('')
   const [name, setName] = useState('')
@@ -71,12 +70,16 @@ export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit, linkEr
         setNotice('If confirmation is needed for this address, a new link has been requested. Check your inbox and spam/junk folder, and use the newest email.')
       }
       if (mode === 'forgot') {
-        await sendPasswordReset(email.trim())
+        const requestedEmail = email.trim()
+        await sendPasswordReset(requestedEmail)
         setCooldown(60)
-        setNotice('Reset request submitted. If this email belongs to an account, look for a password-reset email from FinancialGoal. Check your inbox and spam/junk folder, and use the newest link. If it is in spam, mark it as not spam.')
+        setNotice(`A password-reset link has been requested for ${requestedEmail}. Check your inbox and spam/junk folder, allow a few minutes, and use the newest link.`)
       }
     } catch (cause) {
       const code = (cause as { code?: string })?.code
+      if (mode === 'forgot' && code === 'account_lookup_rate_limited') {
+        setCooldown((cause as { retryAfter?: number }).retryAfter ?? 60)
+      }
       if (mode === 'signup' && ['signup_account_recovery', 'user_already_exists', 'email_exists'].includes(code ?? '')) {
         setMode('signin'); setPassword(''); setConfirmation(''); setShowPassword(false)
       }
@@ -84,7 +87,7 @@ export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit, linkEr
     }
     finally { lock.current = false; setWorking(false) }
   }
-  const visibleError = error || (mode === 'signin' ? errorMessage : '') || (!hideLinkError ? linkError : '')
+  const visibleError = error || (!hideLinkError ? linkError : '')
   const title = { signin: 'Welcome back', signup: 'Step 1 · Create your account', confirm: 'Step 2 · Confirm your email', forgot: 'Reset your password' }[mode]
   return <div className="space-y-5">
     <header className="flex flex-col items-center text-center">
@@ -96,8 +99,19 @@ export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit, linkEr
       {mode === 'signup' ? <p className="mb-5 text-sm leading-relaxed text-[#c9af91]">Create an account, confirm your email, then build your personal plan one step at a time. Made for Dutch freelancers, with amounts in euros.</p> : null}
       {mode === 'confirm' ? <p className="mb-5 text-sm leading-relaxed text-[#c9af91]">Open the confirmation link in your email to continue to setup. If it has not arrived after a few minutes, check your spam/junk folder and the email address below before requesting another link. If you find it in spam, mark it as not spam.</p> : null}
       {mode === 'forgot' ? <p className="mb-5 text-sm text-[#c9af91]">Check your email address below, then select Send reset link. Your current password is not needed. No email is requested until you press that button.</p> : null}
-      {visibleError ? <div role="alert" className="mb-4"><Notice title={visibleError} tone="danger"/></div> : null}
-      {notice ? <div role="status" className="mb-4"><Notice title={notice} tone="info"/></div> : null}
+      {visibleError ? <div role="alert" className="relative mb-4">
+        <Notice title={visibleError} tone="danger"/>
+        {mode === 'signin' || mode === 'forgot' ? <div className="mt-3 flex flex-wrap gap-2">
+          {mode === 'signin' ? <GhostButton disabled={busy} onClick={() => changeMode('forgot')}>Reset password</GhostButton> : null}
+          <GhostButton disabled={busy} onClick={() => changeMode('signup')}>Create account</GhostButton>
+        </div> : null}
+      </div> : null}
+      {notice ? <div className="relative mb-4">
+        <div role="status"><Notice title={notice} tone="info"/></div>
+        {mode === 'forgot' ? <div className="mt-3">
+          <GhostButton disabled={busy} onClick={() => changeMode('signup')}>Create account</GhostButton>
+        </div> : null}
+      </div> : null}
       <form className="relative space-y-4" onSubmit={submit}>
         {mode === 'signup' ? <label className="block"><FieldLabel>Your name (optional)</FieldLabel>
           <input className={inputClassName(false, "text-base")} autoComplete="given-name" maxLength={60} disabled={disabled} value={name} onChange={event => setName(event.target.value)}/>
@@ -124,12 +138,12 @@ export function LoginForm({ errorMessage, isBusy, isConfigured, onSubmit, linkEr
         </GoldButton>
         {!isConfigured ? <p role="alert" className="text-sm text-[#ffb4a7]">Account services are unavailable. Please contact the app owner.</p> : null}
       </form>
-      <div className="relative mt-5 flex flex-wrap justify-center gap-2 border-t border-[#a8744a]/25 pt-4">
+      {mode !== 'signin' || !visibleError ? <div className="relative mt-5 flex flex-wrap justify-center gap-2 border-t border-[#a8744a]/25 pt-4">
         {mode === 'signin' ? <>
-          <GhostButton disabled={busy} onClick={() => changeMode('signup')}>Create an account</GhostButton>
-          <GhostButton disabled={busy} onClick={() => changeMode('forgot')}>Forgot password?</GhostButton>
+          <GhostButton disabled={busy} onClick={() => changeMode('signup')}>Create account</GhostButton>
+          <GhostButton disabled={busy} onClick={() => changeMode('forgot')}>Reset password</GhostButton>
         </> : <GhostButton disabled={busy} onClick={() => changeMode('signin')}>Back to sign in</GhostButton>}
-      </div>
+      </div> : null}
     </Panel>
     {mode === 'signup' ? <p className="text-center text-xs text-[#b0947a]">Account → Email confirmation → Personal setup → Dashboard</p> : null}
   </div>

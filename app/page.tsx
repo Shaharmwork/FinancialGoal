@@ -15,7 +15,6 @@ import {
 import { Dashboard } from "@/components/dashboard";
 import { LoginForm, PasswordResetForm } from "@/components/login-form";
 import { Onboarding } from "@/components/onboarding";
-import { authErrorMessage } from "@/lib/registration";
 import { PhoneStage } from "@/components/phone-stage";
 import { Toast } from "@/components/ui/kit";
 import { WarningModal } from "@/components/warning-modal";
@@ -1232,9 +1231,8 @@ export default function Home() {
       if ((error as { code?: string })?.code === "email_not_confirmed") {
         return "confirmation-required" as const;
       }
-      console.error("[Financial Goal] Sign in failed.", error);
-      const nextMessage = getSignInErrorMessage(error);
-      setToastErrorMessage(nextMessage);
+      // The login form displays auth failures beside its recovery actions.
+      throw error;
     } finally {
       setIsSigningIn(false);
     }
@@ -1376,7 +1374,6 @@ export default function Home() {
           ) : null}
           <section className="w-full">
             <LoginForm
-              errorMessage={toastErrorMessage}
               isBusy={isSigningIn || !hasCheckedSession}
               isConfigured={isConfigured}
               onSubmit={handleSignIn}
@@ -1713,8 +1710,4 @@ function formatConflictDate(dateKey: string) {
     day: "numeric",
     month: "long",
   });
-}
-
-function getSignInErrorMessage(error: unknown) {
-  return authErrorMessage(error);
 }
