@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import Image, { type StaticImageData } from "next/image";
 import CleanDash from "@/src/assets/web/backgrounds/CleanDash.webp";
 import CardStrip from "@/src/assets/backgrounds/stage/card-strip.png";
@@ -10,9 +10,12 @@ import CardTopRight from "@/src/assets/backgrounds/stage/card-top-right.png";
 import CenterHighlightButton from "@/src/assets/web/icons/CenterHighlightButton.png";
 import ConfigurationIcon from "@/src/assets/web/icons/ConfigurationIcon.png";
 import LeftHighlightButton from "@/src/assets/web/icons/LeftHighlightButton.png";
+import OpenConfigurationIcon from "@/src/assets/web/icons/OpenConfigurationIcon.png";
 import OwlIcon from "@/src/assets/web/icons/Owlicon.png";
 import ReportIcon from "@/src/assets/web/icons/ReportIcon.png";
 import RightHighlightButton from "@/src/assets/web/icons/RightHighlightButton.png";
+import SleepOwlIcon from "@/src/assets/web/icons/SleepOwlicon.png";
+import WriteReportIcon from "@/src/assets/web/icons/WriteReportIcon.png";
 import type { Screen } from "@/lib/types";
 
 // Every screen is drawn on the same phone-sized stage (the dashboard artwork's size),
@@ -26,11 +29,6 @@ export const DOCK_HEIGHT = 124;
 type NavItemId = "report" | "dashboard" | "configuration";
 
 const NAV_POS = {
-  bottom: 10,
-  side: 60,
-  height: 101,
-  gap: 45,
-
   selectedCoverRadius: 9,
   // The active highlight sits on its slot's panel in the artwork, in stage pixels.
   // The slots' buttons have different widths, so this can't be derived from the button.
@@ -40,27 +38,45 @@ const NAV_POS = {
     configuration: { left: 259, top: 731, width: 124, height: 104 },
   },
   icon: {
-    report: { offsetX: -10, offsetY: 0, scale: 1.5 },
-    dashboard: { offsetX: 0, offsetY: 0, scale: 2.5 },
-    configuration: { offsetX: 10, offsetY: 0, scale: 2 },
+    report: { size: 76, top: 2 },
+    dashboard: { size: 80, top: 0 },
+    configuration: { size: 84, top: 0 },
   },
   label: {
-    report: { offsetX: -10, offsetY: 20, scale: 1.6 },
-    dashboard: { offsetX: 0, offsetY: 20, scale: 2 },
-    configuration: { offsetX: 15, offsetY: 20, scale: 1.6 },
+    report: 16,
+    dashboard: 20,
+    configuration: 16,
   },
 } as const;
 
+// Each icon has a selected and an unselected state drawn on the same canvas, so
+// switching between them never moves the artwork.
 const NAV_ITEMS: Array<{
+  activeIcon: StaticImageData;
   highlight: StaticImageData;
   icon: StaticImageData;
   id: NavItemId;
   label: string;
   screen: Screen;
 }> = [
-  { highlight: LeftHighlightButton, icon: ReportIcon, id: "report", label: "Report", screen: "daily-log" },
-  { highlight: CenterHighlightButton, icon: OwlIcon, id: "dashboard", label: "Dashboard", screen: "dashboard" },
   {
+    activeIcon: WriteReportIcon,
+    highlight: LeftHighlightButton,
+    icon: ReportIcon,
+    id: "report",
+    label: "Report",
+    screen: "daily-log",
+  },
+  {
+    activeIcon: OwlIcon,
+    highlight: CenterHighlightButton,
+    icon: SleepOwlIcon,
+    id: "dashboard",
+    label: "Dashboard",
+    screen: "dashboard",
+  },
+  {
+    activeIcon: OpenConfigurationIcon,
     highlight: RightHighlightButton,
     icon: ConfigurationIcon,
     id: "configuration",
@@ -88,7 +104,7 @@ function useStageLayout(): StageLayout {
     viewportHeight: STAGE_HEIGHT,
   });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const updateLayout = () => {
       const width = window.innerWidth;
       const height = window.innerHeight;
@@ -252,6 +268,7 @@ export function PhoneStage({
 
   const stage = (
         <div
+          data-phone-stage
           className={`overflow-clip bg-black ${
             isPhone
               ? "absolute left-0 top-0"
@@ -268,38 +285,24 @@ export function PhoneStage({
             width: STAGE_WIDTH,
           }}
         >
-          {variant === "artwork" ? (
-            isPhone ? (
-              <>
-                <CardBackground />
-                <div
-                  className="absolute inset-x-0 top-0 overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-                  data-stage-scroll
-                  style={{ bottom: DOCK_HEIGHT }}
-                >
-                  {/* Keep the artwork geometry, but remove its embedded dock from the scroll area. */}
-                  <div className="relative overflow-hidden" style={{ height: STAGE_HEIGHT - DOCK_HEIGHT }}>
-                    <div className="relative bg-black" style={{ height: STAGE_HEIGHT }}>
-                      {artworkContent}
-                    </div>
-                  </div>
+          <CardBackground bottom={isTyping ? 0 : DOCK_HEIGHT} />
+          <div
+            key={active}
+            className={`stage-screen-enter absolute inset-x-0 top-0 overflow-y-auto overscroll-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
+              variant === "screen" ? "px-4 pb-24 pt-5" : ""
+            }`}
+            data-stage-scroll
+            style={{ bottom: isTyping ? 0 : variant === "artwork" ? DOCK_HEIGHT : DOCK_HEIGHT - 14 }}
+          >
+            {variant === "artwork" ? (
+              <div className="relative overflow-hidden" style={{ height: STAGE_HEIGHT - DOCK_HEIGHT }}>
+                <div className="relative bg-black" style={{ height: STAGE_HEIGHT }}>
+                  {artworkContent}
                 </div>
-                <DockFrame />
-              </>
-            ) : artworkContent
-          ) : (
-            <>
-              <CardBackground bottom={isTyping ? 0 : DOCK_HEIGHT} />
-              <div
-                className="absolute inset-x-0 top-0 overflow-y-auto overscroll-contain px-4 pb-24 pt-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-                data-stage-scroll
-                style={{ bottom: isTyping ? 0 : DOCK_HEIGHT - 14 }}
-              >
-                {children}
               </div>
-              {isTyping ? null : <DockFrame />}
-            </>
-          )}
+            ) : children}
+          </div>
+          {isTyping ? null : <DockFrame />}
           {isTyping ? null : <BottomNavigationDock active={active} onNavigate={onNavigate} />}
         </div>
   );
@@ -401,91 +404,98 @@ export function BottomNavigationDock({
   active: Screen;
   onNavigate?: (screen: Screen) => void;
 }) {
-  const activeItem = NAV_ITEMS.find((item) => item.screen === active);
-  const cover = activeItem ? NAV_POS.cover[activeItem.id] : null;
-
   return (
-    <>
-      {activeItem && cover ? (
-        <span
-          className="pointer-events-none absolute z-[140] overflow-hidden"
-          style={{
-            borderRadius: NAV_POS.selectedCoverRadius,
-            height: cover.height,
-            left: cover.left,
-            bottom: STAGE_HEIGHT - cover.top - cover.height,
-            width: cover.width,
-          }}
-        >
-          <Image alt="" className="object-fill" fill priority sizes="130px" src={activeItem.highlight} />
-        </span>
-      ) : null}
-      <nav
-        className="absolute z-[150]"
-        style={{
-          bottom: NAV_POS.bottom,
-          height: NAV_POS.height,
-          left: NAV_POS.side,
-          right: NAV_POS.side,
-        }}
-      >
-        <div className="grid h-full grid-cols-3" style={{ gap: NAV_POS.gap }}>
-          {NAV_ITEMS.map((item) => (
-            <div key={item.id} className="h-full">
-              <BottomNavItem
-                active={item.screen === active}
-                icon={item.icon}
-                id={item.id}
-                label={item.label}
-                onClick={() => onNavigate?.(item.screen)}
-              />
-            </div>
-          ))}
-        </div>
-      </nav>
-    </>
+    <nav
+      aria-label="Main navigation"
+      className="absolute inset-x-0 bottom-0 z-[150]"
+      style={{ height: DOCK_HEIGHT }}
+    >
+      {NAV_ITEMS.map((item) => (
+        <BottomNavItem
+          key={item.id}
+          active={item.screen === active}
+          activeIcon={item.activeIcon}
+          highlight={item.highlight}
+          icon={item.icon}
+          id={item.id}
+          label={item.label}
+          onClick={() => onNavigate?.(item.screen)}
+        />
+      ))}
+    </nav>
   );
 }
 
 function BottomNavItem({
   active,
+  activeIcon,
+  highlight,
   icon,
   id,
   label,
   onClick,
 }: {
   active: boolean;
+  activeIcon: StaticImageData;
+  highlight: StaticImageData;
   icon: StaticImageData;
   id: NavItemId;
   label: string;
   onClick: () => void;
 }) {
   const iconPos = NAV_POS.icon[id];
-  const labelPos = NAV_POS.label[id];
+  const tile = NAV_POS.cover[id];
 
   return (
     <button
       aria-current={active ? "page" : undefined}
       // No gold-text class on the button: a text-clipped background here would paint the
       // (scaled) label a second time at its unscaled position.
-      className="relative flex h-full min-w-0 flex-col items-center justify-center gap-1 overflow-visible px-1"
+      className="absolute rounded-[9px] focus-visible:outline-2 focus-visible:outline-offset-[-3px] focus-visible:outline-[#ffe6b1]"
+      style={{
+        left: tile.left,
+        bottom: STAGE_HEIGHT - tile.top - tile.height,
+        width: tile.width,
+        height: tile.height,
+      }}
       onClick={onClick}
       type="button"
     >
       <span
-        className="relative h-8 w-8"
-        style={{
-          transform: `translate(${iconPos.offsetX}px, ${iconPos.offsetY}px) scale(${iconPos.scale})`,
-        }}
+        aria-hidden="true"
+        className={`pointer-events-none absolute inset-0 overflow-hidden transition-opacity duration-200 motion-reduce:transition-none ${active ? "opacity-100" : "opacity-0"}`}
+        style={{ borderRadius: NAV_POS.selectedCoverRadius }}
       >
-        <Image alt="" className="object-contain" fill sizes="32px" src={icon} />
+        <Image alt="" className="object-fill" fill priority sizes="130px" src={highlight} />
       </span>
       <span
-        className={`relative w-full overflow-visible whitespace-nowrap text-center text-[10px] font-semibold leading-[1.15] ${
+        className="pointer-events-none absolute left-1/2 -translate-x-1/2"
+        style={{ top: iconPos.top, width: iconPos.size, height: iconPos.size }}
+      >
+        {/* Both states stay loaded and cross-fade, so the first switch doesn't flash. */}
+        {[
+          { shown: !active, src: icon },
+          { shown: active, src: activeIcon },
+        ].map((state) => (
+          <Image
+            key={state.src.src}
+            alt=""
+            aria-hidden="true"
+            className={`pointer-events-none object-contain transition-opacity duration-200 ease-out motion-reduce:transition-none ${
+              state.shown ? "opacity-100" : "opacity-0"
+            }`}
+            fill
+            sizes="84px"
+            src={state.src}
+          />
+        ))}
+      </span>
+      <span
+        className={`pointer-events-none absolute inset-x-0 bottom-1 whitespace-nowrap text-center font-semibold leading-[1.15] ${
           active ? "dashboard-nav-active-text" : "dashboard-gold-label"
         }`}
         style={{
-          transform: `translate(${labelPos.offsetX}px, ${labelPos.offsetY}px) scale(${labelPos.scale})`,
+          fontSize: NAV_POS.label[id],
         }}
       >
         {label}

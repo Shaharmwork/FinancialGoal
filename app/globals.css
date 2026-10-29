@@ -161,3 +161,19 @@
       0 0 8px rgba(255, 134, 37, 0.28);
   }
 }
+
+/* Fade screen content in without moving the persistent phone frame or dock. */
+@keyframes stage-screen-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.stage-screen-enter {
+  animation: stage-screen-enter 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-screen-enter {
+    animation: none;
+  }
+}
