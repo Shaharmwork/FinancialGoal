@@ -35,9 +35,11 @@ localhost uses the same Supabase backend and budget.
 
 ## Owner registration alerts
 
-The Netlify scheduled function `registration-alerts` checks Supabase every five
-minutes and sends an owner email to **shaharmwork@gmail.com**, from
-**rekindledverbouw@gmail.com**, after email confirmation. Gmail SMTP is reused;
+Supabase triggers an asynchronous request to `registration-alert-event` as soon
+as a user confirms their email. The Netlify worker sends an owner email to
+**shaharmwork@gmail.com**, from **rekindledverbouw@gmail.com**. There is no
+five-minute wait in the normal path; delivery normally takes seconds, subject to
+network and email-provider delays. Gmail SMTP is reused;
 there is no additional sender account or domain requirement. Gmail and Netlify
 usage limits still apply. Only the production deployment runs on schedule.
 
@@ -45,12 +47,29 @@ The private queue deduplicates by Supabase user ID. Existing confirmed users are
 marked skipped at migration time. Unconfirmed, anonymous and deleted users do
 not generate emails. Names and addresses appear only in plain-text owner emails,
 not logs; user input never controls recipients, headers, links or attachments.
-No financial data is included. No Auth trigger or synchronous email dependency
-is added to signup.
+No financial data is included. A trigger queues the first confirmation (including
+already-confirmed inserts); `pg_net` dispatches only after the database transaction
+commits. Dispatch or enqueue failures are contained so the scheduled scan can
+recover them without making confirmation depend on the email provider.
+
+The webhook contains only an alert ID and a random one-time token, never the
+Auth user record or the database service key. A service-only RPC atomically
+validates and consumes the token while claiming that specific alert. Replays and
+competing scheduled claims cannot send it twice. Visitors cannot choose
+recipients or email content. The private alert table and event-claim RPC are
+not accessible to app users. Supabase manages the `pg_net` queue with broader
+SQL grants; its temporary request body can be read by roles with direct SQL
+access. The `net` schema must remain outside the Data API exposed schemas
+(verified in production: HTTP 406 / PGRST106). A token authorizes only the
+already-queued owner notification and is consumed on claim; it grants no data
+access or ability to compose mail. Never send the Auth row or service key in it.
+The public endpoint still consumes hosting resources for invalid requests;
+review Netlify traffic controls if abuse or significant growth occurs.
 
 ### Deployment
 
-1. Apply the `registration_alerts` migration before deploying the worker.
+1. Apply the `registration_alerts` and `instant_registration_alerts` migrations.
+   Immediate dispatch starts disabled; the scheduled fallback keeps working.
 2. Add these **secret** environment variables in Netlify, with values for
    **Production only** (leave previews, branches and local development blank):
    - `SUPABASE_SERVICE_ROLE_KEY`: the project's server-only Supabase service-role
@@ -61,9 +80,15 @@ is added to signup.
    Netlify's free plan does not offer custom scope selection; marking each as a
    secret excludes post-processing. Keep both out of client imports and code.
 3. Deploy to the production branch. Changing environment values requires a new
-   deploy. Check Functions → registration-alerts for its Scheduled badge.
-4. Add a single explicitly labelled test entry using Supabase SQL, then use
-   Netlify's Run now button. This does not create an Auth user:
+   deploy. Check Functions → registration-alerts for its Scheduled badge and
+   confirm `registration-alert-event` is deployed. Then enable immediate dispatch
+   in the Supabase SQL editor:
+
+   ```sql
+   update private.registration_alert_settings set webhooks_enabled=true where singleton;
+   ```
+4. Add a single explicitly labelled test entry using Supabase SQL. The trigger
+   dispatches it immediately; do not click Run now. This does not create an Auth user:
 
    ```sql
    insert into private.registration_alerts
@@ -72,12 +97,15 @@ is added to signup.
    ```
 
 5. Confirm the test arrives in the destination mailbox, including its Inbox/Spam
-   placement, and that a second run sends nothing. A `sent` queue status means
+   placement. Confirm the event function ran and the next scheduled run sends
+   nothing for the same alert. A `sent` queue status means
    Gmail accepted the message; it does not prove delivery or Inbox placement.
 
 ### Failure handling and monitoring
 
-One email is processed per five-minute run (12/hour); bursts wait in the queue.
+Normal confirmations each trigger their own immediate invocation. The existing
+`registration-alerts` schedule checks every five minutes only as a recovery path,
+processing one pending alert per run if an event was missed or needs retrying.
 Known temporary pre-delivery failures retry after 15 minutes, at most five
 attempts. Permanent rejections are marked `failed`. Timeouts during delivery,
 interrupted workers, or a failed database acknowledgment after SMTP acceptance
@@ -88,7 +116,7 @@ recovery from an ambiguous SMTP outcome.
 Review Netlify function errors and, using the Supabase SQL editor:
 
 ```sql
-select id,kind,status,attempts,claimed_at,sent_at,error_code
+select id,kind,status,attempts,claimed_at,sent_at,error_code,webhook_request_id,webhook_error
 from private.registration_alerts order by confirmed_at desc;
 ```
 
@@ -100,4 +128,15 @@ To pause sending, remove the Gmail secret and redeploy (queue entries remain).
 
 Local verification: `npm test` and `npm run build`. Database queue tests use
 local Postgres via PGlite; SMTP acceptance and mailbox placement need the live
-end-to-end test described above.
+end-to-end test described above. Trigger tests cover first confirmation,
+already-confirmed inserts, authorization, token replay, competing fallback
+claims, transaction rollback and dispatch/enqueue failures.
+
+The webhook URL is pinned to this production Netlify site in the migration.
+For another deployment, configure the destination before enabling the triggers.
+Do not log webhook bodies or select tokens in routine diagnostics.
+
+Supabase advisor note: the managed, non-relocatable `pg_net` extension reports
+public-schema metadata. Its functions are in `net` (no public function members),
+and that schema is not exposed through the Data API. Do not expose it to silence
+or work around the [extension placement advisory](https://supabase.com/docs/guides/database/database-linter?lint=0014_extension_in_public).
