@@ -16,3 +16,6 @@ node_modules/
 .DS_Store
 # Static export output
 /out/
+
+# Supabase CLI local connection metadata
+supabase/.temp/

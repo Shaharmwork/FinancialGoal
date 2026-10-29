@@ -1,29 +1,27 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Image, { type StaticImageData } from "next/image";
 import BriefcaseIcon from "@/src/assets/web/icons/BreifcaseIcon.png";
 import CalendarSaveIcon from "@/src/assets/web/icons/CalanderSave.png";
 import SandClockIcon from "@/src/assets/web/icons/SandClock.png";
 import CoinsBeforeTaxIcon from "@/src/assets/web/icons/CoinsBeforeTaxIcon.png";
 import ClockIcon from "@/src/assets/web/icons/ClockIcon.png";
-import CompassIcon from "@/src/assets/web/icons/Compass.png";
 import InvoiceIcon from "@/src/assets/web/icons/Invoice.png";
 import SliderButton from "@/src/assets/web/icons/SliderButton.png";
 import SliderFill from "@/src/assets/web/icons/SliderFill.png";
 import TaxReserveIcon from "@/src/assets/web/icons/TaxReserveIcon.png";
+import { getDashboardAlert, type DashboardAlert } from "@/lib/dashboard-alerts";
+import { InfoHelp } from "@/components/info-help";
 import { PhoneStage, STAGE_WIDTH } from "@/components/phone-stage";
 import { isSupportedTaxYear, SUPPORTED_TAX_YEAR } from "@/lib/tax-engine";
 import type { DailyEntry, MonthlySummary, Screen, Settings } from "@/lib/types";
 import {
-  getSetupCompleteness,
   getCurrentMonthStats,
   getCurrentWeekStats,
   getCurrentYearStats,
-  getEarliestMissingCurrentMonthWeekday,
-  getEarliestMissingPreviousMonthWeekday,
+  getMissingCurrentMonthReportDateKeys,
   getEntryInvoicedIncome,
-  getMissingPreviousMonthSummaryKeys,
   toDateKey,
 } from "@/lib/calculations";
 import {
@@ -34,7 +32,6 @@ import {
 } from "@/lib/formatters";
 
 // Hours rule (urencriterium) for the self-employed and starters' deductions.
-const HOURS_RULE = 1225;
 const CONFIG_SCREEN_INTENT_KEY = "configuration-screen-intent";
 const CONFIG_SCREEN_FOCUS_TARGET_KEY = "configuration-screen-focus-target";
 const DASHBOARD_ALERT_PULSE_DISABLED_KEY = "dashboard-alert-pulse-disabled";
@@ -467,7 +464,7 @@ interface DashboardProps {
   onNavigate?: (screen: Screen) => void;
   onGreetingShown?: () => void;
   onOpenConfigurationSetup: () => void;
-  onAddPreviousMonths: () => void;
+  onAddPreviousMonths: (monthKey?: string) => void;
   onDismissCurrentMonthReminder: () => void;
   onFillMissingDays: (targetDateKey?: string) => void;
   settings: Settings;
@@ -493,19 +490,9 @@ export function Dashboard({
   const [isGreetingVisible, setIsGreetingVisible] = useState(false);
   const [isAlertTrayCollapsed, setIsAlertTrayCollapsed] = useState(true);
   const [isAlertPulseDisabled, setIsAlertPulseDisabled] = useState(false);
-  const [isSetupHiddenForCardView, setIsSetupHiddenForCardView] =
-    useState(false);
   const now = new Date();
   const week = getCurrentWeekStats(entries, settings);
   const invoicedThisWeek = getCurrentWeekInvoicedIncome(entries, now);
-  const remainingWorkdays = getRemainingWorkdaysThisWeek(entries, now);
-  // Hours still to work per remaining weekday to reach the weekly goal.
-  const neededHoursPerDay =
-    week.hoursLeft <= 0
-      ? "0h"
-      : remainingWorkdays === 0
-        ? "—"
-        : formatHours(week.hoursLeft / remainingWorkdays);
   const month = getCurrentMonthStats(entries, monthlySummaries, settings);
   const year = getCurrentYearStats(entries, monthlySummaries, settings);
   const projectedTakeHome = year.projectedAnnualNet;
@@ -514,42 +501,13 @@ export function Dashboard({
     : 0;
   const beforeTaxTarget = year.requiredAnnualBeforeTaxAmount;
   const greeting = getGreeting(now, displayName);
-  const hasBusinessHistory = entries.length > 0 || monthlySummaries.length > 0;
-  const setupCompleteness = getSetupCompleteness(
-    settings,
-    entries,
-    monthlySummaries,
-    now,
-  );
-  const earliestMissingCurrentMonthDay = getEarliestMissingCurrentMonthWeekday(
+  const hasBusinessHistory = entries.some((entry) => entry.hours > 0 || entry.invoicedIncome > 0 || entry.expenses > 0) || monthlySummaries.length > 0;
+  const missingCurrentMonthDays = getMissingCurrentMonthReportDateKeys(
     entries,
     now,
     monthlySummaries,
   );
-  const shouldShowCurrentMonthReminder =
-    earliestMissingCurrentMonthDay !== undefined;
-  const missingPreviousMonthSummaryKeys = getMissingPreviousMonthSummaryKeys(
-    entries,
-    monthlySummaries,
-    now,
-  );
-  const earliestMissingHistoricalDay = getEarliestMissingPreviousMonthWeekday(
-    entries,
-    monthlySummaries,
-    now,
-  );
-  const baseConfigurationStatus = !setupCompleteness.baseConfigurationComplete
-    ? "Missing"
-    : setupCompleteness.isUsingStarterBaseSettings
-      ? "Review recommended"
-      : "Ready";
-  const isBaseConfigurationMissing = baseConfigurationStatus !== "Ready";
-  const isSetupIncomplete =
-    isBaseConfigurationMissing ||
-    missingPreviousMonthSummaryKeys.length > 0 ||
-    earliestMissingHistoricalDay !== undefined;
-  const hasMissingDaysReports =
-    !isReportsAlertDismissed && shouldShowCurrentMonthReminder;
+  const earliestMissingCurrentMonthDay = missingCurrentMonthDays[0];
   const projectedProfit = year.projectedAnnualPreTaxIncome;
   const gapToGoal =
     projectedTakeHome === undefined
@@ -567,31 +525,7 @@ export function Dashboard({
   const neededMonthlyAverage =
     gapToGoal === undefined || gapToGoal <= 0 ? 0 : gapToGoal / monthsRemaining;
   const status = getTargetStatus(projectedTakeHome, yearlyNetGoal);
-  const setupBanner = isSetupIncomplete
-    ? {
-        kind: "configuration" as const,
-        missingReportDateKey:
-          !isBaseConfigurationMissing ? earliestMissingHistoricalDay : undefined,
-        tooltip: isBaseConfigurationMissing
-          ? "Your core setup is incomplete. Add your defaults, financial assumptions, and targets so projections, tax guidance, and progress tracking can work correctly."
-          : missingPreviousMonthSummaryKeys.length > 0
-            ? "Your reporting history is incomplete. Backfill daily logs or add monthly summaries to improve yearly accuracy."
-            : "Your reporting history has missing work days. Complete the first missing day in your earliest partial month to improve yearly accuracy.",
-      }
-    : null;
-  const reportsBanner = hasMissingDaysReports
-    ? {
-        kind: "reports" as const,
-        tooltip:
-          "Some work days in the current month have not been reported yet. Reporting them improves this month’s totals, yearly projections, tax guidance, and progress tracking.",
-      }
-    : null;
-  const visibleBanner =
-    setupBanner && !isSetupHiddenForCardView
-      ? setupBanner
-      : reportsBanner
-        ? reportsBanner
-        : setupBanner;
+  const visibleBanner = getDashboardAlert(entries, monthlySummaries, settings, now, isReportsAlertDismissed);
   const isTaxYearSupported = isSupportedTaxYear(now.getFullYear());
   // Outside the supported year no tax-based figure is shown, rather than 2026 rules.
   const heroSupportSentence = !isTaxYearSupported
@@ -631,15 +565,7 @@ export function Dashboard({
   };
 
   const openHistoryUpdateFromAlert = () => {
-    if (typeof window !== "undefined") {
-      window.sessionStorage.setItem(CONFIG_SCREEN_INTENT_KEY, "update-history");
-      window.sessionStorage.setItem(
-        CONFIG_SCREEN_FOCUS_TARGET_KEY,
-        "add-month",
-      );
-    }
-
-    onAddPreviousMonths();
+    onAddPreviousMonths(visibleBanner?.monthKey);
   };
 
   const handleCollapseAlertTray = () => {
@@ -649,32 +575,14 @@ export function Dashboard({
 
   const handleExpandAlertTray = () => {
     disableAlertPulseForSession();
-    setIsSetupHiddenForCardView(false);
     setIsAlertTrayCollapsed(false);
-  };
-
-  const handleSetupLater = () => {
-    if (reportsBanner) {
-      setIsSetupHiddenForCardView(true);
-      setIsAlertTrayCollapsed(true);
-      return;
-    }
-
-    setIsAlertTrayCollapsed(true);
   };
 
   const handleReportsDismiss = () => {
     disableAlertPulseForSession();
-    setIsSetupHiddenForCardView(false);
     setIsAlertTrayCollapsed(true);
     onDismissCurrentMonthReminder();
   };
-
-  useEffect(() => {
-    if (!isSetupIncomplete) {
-      setIsSetupHiddenForCardView(false);
-    }
-  }, [isSetupIncomplete]);
 
   useEffect(() => {
     if (!visibleBanner) {
@@ -740,9 +648,21 @@ export function Dashboard({
               },
               {
                 id: "pace",
-                icon: CompassIcon,
-                label: "Needed/day",
-                value: neededHoursPerDay,
+                icon: CalendarSaveIcon,
+                label: "Missing/month",
+                value: String(missingCurrentMonthDays.length),
+                info: {
+                  title: `Missing reports this month: ${missingCurrentMonthDays.length}`,
+                  body: <>
+                    <p>Past weekdays from the start of this month without a report, including days before you created your account. Today and weekends are excluded. Approved holidays count as reported vacation days.</p>
+                    <p>Days marked as worked, no work or vacation count as reported. An employment month does not need daily reports.</p>
+                    {earliestMissingCurrentMonthDay ? <button type="button"
+                      className="mt-3 rounded-lg border border-[#a8744a]/55 px-3 py-2 font-semibold text-[#f3e4cf]"
+                      onClick={() => onFillMissingDays(earliestMissingCurrentMonthDay)}>
+                      Report missing days
+                    </button> : <p>No missing reports this month.</p>}
+                  </>,
+                },
               },
               {
                 id: "invoiced",
@@ -759,21 +679,15 @@ export function Dashboard({
 
           {visibleBanner ? (
             <DashboardSupportTray
-              bannerKind={visibleBanner.kind}
-              infoTooltip={visibleBanner.tooltip}
+              alert={visibleBanner}
               isCollapsed={isAlertTrayCollapsed}
               onAddPreviousMonths={openHistoryUpdateFromAlert}
               onCollapse={handleCollapseAlertTray}
               onDismissCurrentMonthReminder={handleReportsDismiss}
               onExpand={handleExpandAlertTray}
               onFillMissingDays={onFillMissingDays}
-              onLaterSetup={handleSetupLater}
+              onLaterSetup={handleCollapseAlertTray}
               onOpenConfigurationSetup={openConfigurationSetupFromAlert}
-              reportTargetDateKey={
-                "missingReportDateKey" in visibleBanner
-                  ? visibleBanner.missingReportDateKey
-                  : undefined
-              }
               shouldPulseCollapsedAlert={!isAlertPulseDisabled}
             />
           ) : null}
@@ -807,6 +721,7 @@ function WeeklyStrip({
     icon: StaticImageData;
     label: string;
     value: string;
+    info?: { title: string; body: ReactNode };
   }>;
 }) {
   return (
@@ -858,6 +773,7 @@ function WeeklyStrip({
             icon={item.icon}
             label={item.label}
             value={item.value}
+            info={item.info}
           />
         ))}
       </section>
@@ -870,16 +786,18 @@ function WeeklyStripItem({
   icon,
   label,
   value,
+  info,
 }: {
   id: WeeklyItemId;
   icon: StaticImageData;
   label: string;
   value: string;
+  info?: { title: string; body: ReactNode };
 }) {
   const iconSize = getWeeklyIconSize(id);
 
-  return (
-    <div
+  const tile = (
+    <span
       className="grid h-full min-w-0 justify-items-center overflow-visible px-1 text-center"
       style={{
         transform: getOffsetTransform(
@@ -949,8 +867,11 @@ function WeeklyStripItem({
           {value}
         </span>
       </span>
-    </div>
+    </span>
   );
+  return info ? <InfoHelp title={info.title} body={info.body} trigger={tile}
+    triggerClassName="h-full min-w-0 rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#f2d6ab]"
+  /> : tile;
 }
 
 function GreetingBubble({ greeting, now }: { greeting: string; now: Date }) {
@@ -1021,8 +942,7 @@ function SetupWarningIcon() {
 }
 
 function DashboardSupportTray({
-  bannerKind,
-  infoTooltip,
+  alert,
   isCollapsed,
   onAddPreviousMonths,
   onCollapse,
@@ -1031,11 +951,9 @@ function DashboardSupportTray({
   onFillMissingDays,
   onLaterSetup,
   onOpenConfigurationSetup,
-  reportTargetDateKey,
   shouldPulseCollapsedAlert,
 }: {
-  bannerKind: "configuration" | "reports";
-  infoTooltip: string;
+  alert: DashboardAlert;
   isCollapsed: boolean;
   onAddPreviousMonths: () => void;
   onCollapse: () => void;
@@ -1044,13 +962,14 @@ function DashboardSupportTray({
   onFillMissingDays: (targetDateKey?: string) => void;
   onLaterSetup: () => void;
   onOpenConfigurationSetup: () => void;
-  reportTargetDateKey?: string;
   shouldPulseCollapsedAlert: boolean;
 }) {
   const [isInfoOpen, setIsInfoOpen] = useState(false);
   const infoButtonRef = useRef<HTMLButtonElement>(null);
   const infoPopoverRef = useRef<HTMLDivElement>(null);
-  const isConfigurationBanner = bannerKind === "configuration";
+  const { kind: bannerKind, title, subtitle, tooltip: infoTooltip, reportDateKey: reportTargetDateKey } = alert;
+  const isConfigurationBanner = bannerKind !== "reports";
+  const isMonthsBanner = bannerKind === "months";
   const offsetX = isConfigurationBanner
     ? DASHBOARD_POS.tray.configurationOffsetX
     : DASHBOARD_POS.tray.reportsOffsetX;
@@ -1059,46 +978,12 @@ function DashboardSupportTray({
     : DASHBOARD_POS.tray.reportsOffsetY;
 
   const badgeLabel = isConfigurationBanner ? "Critical" : "Warning";
-  const isHistoryBanner =
-    isConfigurationBanner &&
-    infoTooltip ===
-      "Your reporting history is incomplete. Backfill daily logs or add monthly summaries to improve yearly accuracy.";
-  const isPartialHistoryBanner =
-    isConfigurationBanner &&
-    infoTooltip ===
-      "Your reporting history has missing work days. Complete the first missing day in your earliest partial month to improve yearly accuracy.";
-  const title = isConfigurationBanner
-    ? isHistoryBanner || isPartialHistoryBanner
-      ? "Missing History"
-      : "Missing Configuration"
-    : "Missing Days Reports";
-  const subtitle = isConfigurationBanner
-    ? isHistoryBanner || isPartialHistoryBanner
-      ? "Projection incomplete"
-      : "Setup incomplete"
-    : "Projection compromised";
-  const shouldReportMissingHistory =
-    (isHistoryBanner || isPartialHistoryBanner) &&
-    reportTargetDateKey !== undefined;
-  const actionLabel = isConfigurationBanner
-    ? isHistoryBanner || isPartialHistoryBanner
-      ? shouldReportMissingHistory
-        ? "Report Missing Days"
-        : "Update History"
-      : "Complete Setup"
-    : "Report Missing Days";
+  const actionLabel = bannerKind === "configuration" ? "Complete Setup" : "Report Missing Days";
   const secondaryLabel = isConfigurationBanner ? "Later" : "Dismiss";
   const secondarySubLabel = isConfigurationBanner ? "" : "This session";
-  const action = isConfigurationBanner
-    ? shouldReportMissingHistory
-      ? () => onFillMissingDays(reportTargetDateKey)
-      : isHistoryBanner
-        ? onAddPreviousMonths
-        : onOpenConfigurationSetup
-    : () => onFillMissingDays();
-  const secondaryAction = isConfigurationBanner
-    ? onLaterSetup
-    : onDismissCurrentMonthReminder;
+  const action = bannerKind === "configuration"
+    ? onOpenConfigurationSetup : () => onFillMissingDays(reportTargetDateKey);
+  const secondaryAction = isConfigurationBanner ? onLaterSetup : onDismissCurrentMonthReminder;
   const shouldPulseCollapsed = isCollapsed && shouldPulseCollapsedAlert;
 
   useEffect(() => {
@@ -1290,6 +1175,18 @@ function DashboardSupportTray({
               </p>
             </div>
 
+            {isMonthsBanner ? (
+              <div className="ml-1 grid w-[148px] shrink-0 gap-1">
+                <button type="button" onClick={onAddPreviousMonths}
+                  className="h-6 rounded-md border border-[#fff0b4] bg-[linear-gradient(180deg,#ffd777,#dca653)] px-2 text-[11px] font-semibold text-[#241507]">
+                  Complete months
+                </button>
+                <button type="button" onClick={() => onFillMissingDays(reportTargetDateKey)}
+                  className="h-6 rounded-md border border-[#c79660] bg-[#21160e] px-2 text-[11px] font-semibold text-[#f7dfb9]">
+                  Report daily hours
+                </button>
+              </div>
+            ) : (
             <div
               className="ml-1 flex shrink-0 items-center"
               style={{
@@ -1417,6 +1314,7 @@ function DashboardSupportTray({
                 ) : null}
               </button>
             </div>
+            )}
           </>
         )}
       </div>
@@ -1587,7 +1485,6 @@ function YearlyPlanningCard({
     projectedTakeHome === undefined ? "—" : formatCurrency(projectedTakeHome);
   const shortMonth = now.toLocaleDateString("en-GB", { month: "short" });
   const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const hoursToRule = Math.max(0, HOURS_RULE - yearHours);
 
   return (
     <section
@@ -1730,12 +1627,6 @@ function YearlyPlanningCard({
             }}
           >
             <DashboardMetricCard
-              caption={
-                hoursToRule > 0
-                  ? `Tax threshold: ${formatHours(hoursToRule)} left`
-                  : `${formatNumber(HOURS_RULE)}h tax threshold reached`
-              }
-              captionTone={hoursToRule > 0 ? "warn" : "good"}
               icon={ClockIcon}
               label="Hours this year"
               value={formatHours(yearHours)}
@@ -1766,7 +1657,7 @@ function YearlyPlanningCard({
               style={{ top: DASHBOARD_POS.tax.itemsY }}
             >
               {unsupportedTaxYear !== undefined ? (
-                <p className="dashboard-gold-soft min-h-[40px] px-2 text-center text-[12px] leading-[1.35]">
+                <p className="dashboard-gold-soft min-h-[40px] rounded-xl border border-[#a77b4e]/40 bg-[#140f0b]/85 px-3 py-3 text-center text-[12px] leading-[1.35] shadow-lg">
                   Tax estimates for {unsupportedTaxYear} aren&apos;t available yet.
                   <br />The app only has the {SUPPORTED_TAX_YEAR} tax rules.
                 </p>
@@ -1815,7 +1706,7 @@ function YearlyPlanningCard({
                   </div>
                 </div>
               ) : (
-                <p className="dashboard-gold-soft min-h-[40px] px-2 text-center text-[12px] leading-[1.35]">
+                <p className="dashboard-gold-soft min-h-[40px] rounded-xl border border-[#a77b4e]/40 bg-[#140f0b]/85 px-3 py-3 text-center text-[12px] leading-[1.35] shadow-lg">
                   Tax guidance starts after you log income
                   <br />or backfill a month!
                 </p>
@@ -2032,20 +1923,6 @@ function getHeroSupportSentence({
   }
 
   return `Ahead by ${formatCurrency(amountAhead ?? 0)}\nKeep the pace steady`;
-}
-
-// Weekdays left this week, counting today only if it hasn't been reported yet.
-function getRemainingWorkdaysThisWeek(entries: DailyEntry[], now: Date) {
-  const day = now.getDay();
-
-  if (day === 0 || day === 6) {
-    return 0;
-  }
-
-  const daysThroughFriday = 6 - day;
-  const isTodayReported = entries.some((entry) => entry.date === toDateKey(now));
-
-  return isTodayReported ? daysThroughFriday - 1 : daysThroughFriday;
 }
 
 function getCurrentWeekInvoicedIncome(entries: DailyEntry[], now: Date) {

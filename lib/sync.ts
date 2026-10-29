@@ -302,8 +302,11 @@ export function hasSummaryChanges(saved: MonthlySummary[], draft: MonthlySummary
 }
 
 function comparableSettings(settings: Settings) {
-  const { updatedAt: _updatedAt, ...rest } = settings
-  return JSON.stringify(rest)
+  // Only the selected year's editable fields are a draft. Other-year snapshots
+  // and object key order must not make an unchanged plan look edited.
+  const { updatedAt: _updatedAt, yearlySettings: _years, ...rest } = settings
+  return JSON.stringify(Object.entries(rest).filter(([, value]) => value !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right)))
 }
 
 export function isSameSettingsContent(left: Settings, right: Settings) {

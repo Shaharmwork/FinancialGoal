@@ -1,11 +1,13 @@
 'use client'
 
+import { getDutchPublicHolidayWeekdays } from '@/lib/calculations'
 import { useEffect, useRef, useState } from 'react'
 import { FieldLabel, GhostButton, GoldButton, inputClassName, Notice, Panel } from '@/components/ui/kit'
 import { initialSetupDraft, restoreSetupDraft, settingsFromSetup, setupErrors, setupFieldSteps, setupStepLabels, type SetupDraft } from '@/lib/registration'
 import type { Settings } from '@/lib/types'
 
 const setupHelp: Record<keyof SetupDraft, { title: string; body: string }> = {
+  holidays: {title: 'Dutch holidays', body: 'Optional approval for weekday holidays. Saved as editable vacation reports when setup is saved.'},
   target: {
     title: 'Take-home per month (Net)',
     body: 'The amount you want your business to provide each month after estimated tax. This is your personal take-home goal, not your invoices or turnover. The dashboard works backward to estimate how much you need to earn before tax.',
@@ -28,7 +30,7 @@ const setupHelp: Record<keyof SetupDraft, { title: string; body: string }> = {
   },
   vacation: {
     title: 'Planned days off / year',
-    body: 'Whole weekdays you plan not to work during the year. These reduce the hours available in the planning check, which uses a five-day workweek. Include public holidays you plan to take off; they are not subtracted automatically. Do not count weekends again. Enter 0 if you have not planned any yet.',
+    body: 'Whole weekdays you plan not to work during the year. These reduce the hours available in the planning check, which uses a five-day workweek. Approving Dutch holidays below adds them to this total. You can add extra days; they are not subtracted twice. Do not count weekends again. Enter 0 if you have not planned any yet.',
   },
   reserve: {
     title: 'Reserve buffer',
@@ -172,6 +174,21 @@ export function Onboarding({ userId, onSave, onComplete, onSignOut }: {
                 {numberField('weeklyHours', 'Hours / per week', 'How many hours you aim to work in a usual week.', 0.25, 168)}
                 {numberField('vacation', 'Planned days off / year', 'Whole workdays you plan to take off. Enter 0 if none.', 0, 260, '1', 'e.g. 20')}
               </> : null}
+              {step === 1 ? <div className="space-y-2">
+                <label className="flex gap-3 text-sm">
+                  <input type="checkbox" checked={draft.holidays === 'yes'} disabled={busy}
+                    onChange={event => {
+                      const count = getDutchPublicHolidayWeekdays(new Date().getFullYear()).length
+                      setDraft({...draft, holidays: event.target.checked ? 'yes' : 'no',
+                        vacation: String(Math.max(0, Number(draft.vacation || 0) + (event.target.checked ? count : -count)))})
+                    }} />
+                  <span>I approve Dutch weekday holidays as vacation for {new Date().getFullYear()}.</span>
+                </label>
+                <p className="text-xs text-[#b0947a]">Adds {getDutchPublicHolidayWeekdays(new Date().getFullYear()).length} days to the total above and marks those dates as vacation when you save. You can edit each mark later.</p>
+                {draft.holidays === 'yes' ? <Notice title="The total and calendar are separately editable">
+                  Reducing or clearing planned days off will not remove the approved holiday marks. Turn this option off to remove them, or edit individual days after setup.
+                </Notice> : null}
+              </div> : null}
               {step === 2 ? <>
                 {numberField('reserve', 'Reserve buffer (%)', 'An extra cushion on top of the estimated tax reserve; this is not your tax rate.', 0, 100)}
                 {choice('deduction', 'Self-employed deduction eligibility')}
@@ -182,7 +199,7 @@ export function Onboarding({ userId, onSave, onComplete, onSignOut }: {
                 <p className="text-sm text-[#b0947a]">Check your starting settings before saving them to your account.</p>
                 {[
                   ['Your goal', `€${draft.target} take-home per month (Net) · €${draft.spouse} other net household income/month`],
-                  ['Your work', `€${draft.hourlyRate}/hour excl. VAT · ${draft.shiftHours}h per day/shift · ${draft.weeklyHours}h per week · ${draft.vacation} planned days off/year`],
+                  ['Your work', `€${draft.hourlyRate}/hour excl. VAT · ${draft.shiftHours}h per day/shift · ${draft.weeklyHours}h per week · ${draft.vacation} planned days off/year · Dutch holidays: ${draft.holidays === 'yes' ? 'approved' : 'not enabled'}`],
                   ['Tax assumptions', `${draft.reserve}% extra buffer · Self-employed deduction: ${draft.deduction === 'yes' ? 'included' : 'excluded'} · Starters deduction: ${draft.deduction === 'yes' && draft.starter === 'yes' ? 'included' : 'excluded'}`],
                 ].map(([label, detail], index) => <div key={label} className="rounded-xl border border-[#a8744a]/30 p-3">
                   <div className="flex items-center justify-between"><h3 className="font-semibold">{label}</h3><GhostButton disabled={busy} onClick={() => {setStep(index); setAttempted(false)}}>Edit</GhostButton></div>

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { asUser, createTestDatabase, rpc, USER_A, USER_B } from './db-harness'
 
-// Runs supabase/schema.sql + migrations/20261028_safe_saving.sql in a local Postgres
+// Runs supabase/schema.sql + migrations/20261028000000_safe_saving.sql in a local Postgres
 // (PGlite) as the `authenticated` role with row-level security, like the real app.
 
 type Db = Awaited<ReturnType<typeof createTestDatabase>>
@@ -150,6 +150,39 @@ describe('save_daily_entry / delete_daily_entry', () => {
     expect(deleted.status).toBe('deleted')
     expect(retry.status).toBe('deleted')
     expect(await countRows(db, `select count(*) from daily_entry_work_items`)).toBe(0)
+  })
+
+  it('undo restores a deleted report and all split work items; a lost response can be retried', async () => {
+    const entry = { ...day('undo-day', '2026-10-01', 5, 250), expenses: 12, note: 'Keep this note', source: 'manual' }
+    const items = [hourlyItem(2, 50, 0), hourlyItem(3, 50, 1)]
+    const created = await saveDay(db, USER_A, entry, items, null, MUTATION_1)
+    await saveDay(db, USER_A, day('untouched', '2026-10-02', 8, 400), [], null, MUTATION_2)
+    await rpc(db, USER_A, 'delete_daily_entry', ['undo-day', created.entry!.updated_at])
+
+    const restored = await saveDay(db, USER_A, entry, items, null, MUTATION_3)
+    const retried = await saveDay(db, USER_A, entry, items, null, MUTATION_3)
+    expect(restored.status).toBe('saved')
+    expect(retried.entry?.updated_at).toBe(restored.entry?.updated_at)
+    expect(restored.work_items?.map(item => Number(item.hours))).toEqual([2, 3])
+    const stored = await db.query<{ expenses: string; note: string }>("select expenses, note from daily_entries where id = 'undo-day'")
+    expect(Number(stored.rows[0].expenses)).toBe(12)
+    expect(stored.rows[0].note).toBe('Keep this note')
+    expect(await countRows(db, 'select count(*) from daily_entries')).toBe(2)
+    expect(await countRows(db, 'select count(*) from daily_entry_work_items')).toBe(2)
+  })
+
+  it('undo never overwrites a replacement report created on another device', async () => {
+    const entry = day('undo-day', '2026-10-01', 2, 100)
+    const created = await saveDay(db, USER_A, entry, [], null, MUTATION_1)
+    await rpc(db, USER_A, 'delete_daily_entry', ['undo-day', created.entry!.updated_at])
+    await saveDay(db, USER_A, day('new-day', '2026-10-01', 8, 400), [], null, MUTATION_2)
+
+    const undo = await saveDay(db, USER_A, entry, [], null, MUTATION_3)
+    expect(undo).toMatchObject({ status: 'conflict', reason: 'exists' })
+    const stored = await db.query<{ id: string; hours: string }>('select id, hours from daily_entries')
+    expect(stored.rows).toHaveLength(1)
+    expect(stored.rows[0].id).toBe('new-day')
+    expect(Number(stored.rows[0].hours)).toBe(8)
   })
 
   it('saving a day that was deleted elsewhere reports a conflict', async () => {

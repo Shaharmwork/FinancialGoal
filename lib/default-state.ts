@@ -23,6 +23,9 @@ export const defaultSettings: Settings = {
 }
 
 export const emptySettings: Settings = {
+  year: new Date().getFullYear(),
+  dutchHolidaysEnabled: false,
+  holidayDaysAdded: 0,
   targetNetMonth: null,
   spouseMonthlyIncome: 0,
   defaultShiftIncome: null,
@@ -155,7 +158,20 @@ export function normalizeSettings(value: unknown): Settings {
     return emptySettings
   }
 
+  const yearlySettings: NonNullable<Settings['yearlySettings']> = {}
+  if (isRecord(value.yearlySettings)) {
+    for (const [year, config] of Object.entries(value.yearlySettings)) {
+      if (!/^\d{4}$/.test(year) || !isRecord(config)) continue
+      const { year: _year, yearlySettings: _years, updatedAt: _version, ...fields } =
+        normalizeSettings({ ...config, yearlySettings: undefined })
+      yearlySettings[year] = fields
+    }
+  }
   return {
+    year: readNumber(value.year, 2026),
+    dutchHolidaysEnabled: value.dutchHolidaysEnabled === true,
+    holidayDaysAdded: Math.max(0, readNumber(value.holidayDaysAdded, 0)),
+    ...(Object.keys(yearlySettings).length ? { yearlySettings } : {}),
     targetNetMonth: readNullableNumber(value.targetNetMonth ?? value.monthlyNetGoal),
     spouseMonthlyIncome: readNumber(value.spouseMonthlyIncome, emptySettings.spouseMonthlyIncome),
     defaultShiftIncome: readNullableNumber(value.defaultShiftIncome),

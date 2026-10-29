@@ -7,9 +7,11 @@ import { createPortal } from 'react-dom'
 interface InfoHelpProps {
   body: ReactNode
   title: string
+  trigger?: ReactNode
+  triggerClassName?: string
 }
 
-export function InfoHelp({ body, title }: InfoHelpProps) {
+export function InfoHelp({ body, title, trigger, triggerClassName }: InfoHelpProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [isMounted, setIsMounted] = useState(false)
   const titleId = useId()
@@ -44,11 +46,11 @@ export function InfoHelp({ body, title }: InfoHelpProps) {
     <>
       <button
         aria-label={`More info about ${title}`}
-        className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border border-[#9d7248]/60 bg-[#17110d] text-[10px] font-semibold text-[#f2d6ab] transition hover:bg-[#231914] hover:text-[#fff3df]"
+        className={triggerClassName ?? "inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border border-[#9d7248]/60 bg-[#17110d] text-[10px] font-semibold text-[#f2d6ab] transition hover:bg-[#231914] hover:text-[#fff3df]"}
         onClick={() => setIsOpen((currentValue) => !currentValue)}
         type="button"
       >
-        i
+        {trigger ?? 'i'}
       </button>
 
       {isOpen && isMounted

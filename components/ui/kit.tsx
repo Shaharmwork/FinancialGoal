@@ -1,6 +1,7 @@
 "use client";
 
 import Image, { type StaticImageData } from "next/image";
+import { useEffect, useRef, useState } from "react";
 import type {
   ButtonHTMLAttributes,
   ReactNode,
@@ -151,6 +152,8 @@ function parseOptionalNumber(value: string) {
 }
 
 export function NumberField({
+  onFocus,
+  onBlur,
   disabled,
   help,
   info,
@@ -172,6 +175,8 @@ export function NumberField({
   invalid?: boolean;
   label: ReactNode;
   onChange: (value: number | null) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
   placeholder?: string;
   prefix?: string;
   step?: number | string;
@@ -203,6 +208,8 @@ export function NumberField({
           step={step}
           type="number"
           value={value ?? ""}
+          onFocus={onFocus}
+          onBlur={onBlur}
           onChange={(event) => onChange(parseOptionalNumber(event.target.value))}
         />
         {suffix ? (
@@ -441,17 +448,52 @@ export function Toast({
   message,
   onDismiss,
   tone,
+  persistent = false,
+  action,
 }: {
   message: string;
   onDismiss: () => void;
   tone: "success" | "error";
+  persistent?: boolean;
+  action?: { label: string; onClick: () => void; disabled?: boolean };
 }) {
+  const dismissRef = useRef(onDismiss);
+  const manualDismissTimer = useRef<number | null>(null);
+  const [isLeaving, setIsLeaving] = useState(false);
+  useEffect(() => { dismissRef.current = onDismiss; }, [onDismiss]);
+
+  useEffect(() => {
+    setIsLeaving(false);
+    if (!message || persistent) return;
+    // Fade during the final 300 ms, then clear the message at ten seconds.
+    const fadeTimer = window.setTimeout(() => setIsLeaving(true), 9_700);
+    const dismissTimer = window.setTimeout(() => dismissRef.current(), 10_000);
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(dismissTimer);
+      if (manualDismissTimer.current !== null) {
+        window.clearTimeout(manualDismissTimer.current);
+        manualDismissTimer.current = null;
+      }
+    };
+  }, [message, tone, persistent]);
+
+  const dismissWithFade = () => {
+    if (persistent) { dismissRef.current(); return; }
+    if (isLeaving) return;
+    setIsLeaving(true);
+    manualDismissTimer.current = window.setTimeout(() => dismissRef.current(), 300);
+  };
+
   if (!message) {
     return null;
   }
 
   return (
-    <div className="pointer-events-none fixed inset-x-0 top-3 z-[2147483000] px-3">
+    <div className={cx(
+      "pointer-events-none fixed inset-x-0 top-3 z-[2147483000] px-3 transition-opacity duration-300 ease-out motion-reduce:transition-none",
+      isLeaving ? "opacity-0" : "opacity-100",
+    )}>
       <div
         aria-live="polite"
         className={cx(
@@ -466,10 +508,21 @@ export function Toast({
           {tone === "success" ? "✓" : "!"}
         </span>
         <p className="flex-1 leading-5">{message}</p>
+        {action ? (
+          <button
+            className="min-h-11 shrink-0 rounded-lg px-2 font-semibold underline underline-offset-4 disabled:opacity-50"
+            disabled={action.disabled}
+            onClick={action.onClick}
+            type="button"
+          >
+            {action.label}
+          </button>
+        ) : null}
         <button
           aria-label="Dismiss message"
+          disabled={action?.disabled}
           className="shrink-0 rounded-full px-1.5 text-base leading-none opacity-70 transition hover:opacity-100"
-          onClick={onDismiss}
+          onClick={dismissWithFade}
           type="button"
         >
           ×

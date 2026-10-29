@@ -57,18 +57,41 @@ indefinitely. If additional user-owned tables are added, update the guards and t
 
 Validation: five PGlite tests cover deletion/cascading identities, repeat runs, protected
 accounts, recent activity, app/storage data, batch size, and blocked application roles.
-The live dry run found zero eligible accounts. Automatic migration application failed
-with an expired-request integration error; this migration is **not enabled yet**.
+Before applying, the function's exact predicate matched zero eligible accounts in
+production (counted read-only, no emails read).
 
-After applying, verify the schedule:
+**Enabled on 29 October 2026** with `supabase db push --linked`. Verified afterwards:
+- Migration history: `20261028000000` (safe-saving, applied earlier outside the CLI and
+  recorded with `migration repair`; the file was renamed from `20261028_safe_saving.sql`
+  so the CLI orders it correctly, contents unchanged) and `20261028091636` (cleanup).
+- pg_cron 1.6.4 installed; `cron.timezone` is GMT.
+- `private.cleanup_abandoned_registrations()`: one copy, owned by `postgres`, SECURITY
+  INVOKER, `search_path=''`, ACL `{postgres=X/postgres}`. `anon`, `authenticated` and
+  `service_role` have neither EXECUTE on it nor USAGE on schema `private`.
+- Exactly one cron job in the database: `financialgoal-cleanup-abandoned-registrations`,
+  schedule `17 3 * * *` (03:17 UTC), active, runs as `postgres` in database `postgres`.
+  `postgres` owns the function and has the needed privileges on every guarded table.
+- The job is **scheduled**; no run had happened yet at verification time (zero entries
+  in `cron.job_run_details`). The first run is 30 October 2026 03:17 UTC. Cleanup was not
+  run manually.
+
+Check the schedule (expect exactly one active row, `17 3 * * *`, username `postgres`):
 ```sql
-select jobid, jobname, schedule, active from cron.job
+select jobid, jobname, schedule, active, username from cron.job
 where jobname = 'financialgoal-cleanup-abandoned-registrations';
 ```
-Monitor runs in Supabase > Integrations > Cron > History. To pause cleanup:
+Monitor runs in Supabase > Integrations > Cron > History, or:
+```sql
+select status, return_message, start_time from cron.job_run_details
+where jobid = (select jobid from cron.job
+  where jobname = 'financialgoal-cleanup-abandoned-registrations')
+order by start_time desc limit 5;
+```
+To pause cleanup:
 ```sql
 select cron.unschedule('financialgoal-cleanup-abandoned-registrations');
 ```
 Pausing does not restore deleted accounts. No cleanup has been run against live data
 by the agent. SMTP and redirects were configured separately; the user reported a
-successful confirmation/setup flow. Website changes remain local.
+successful confirmation/setup flow. The registration website changes are pushed
+(c37c65c) and live.

@@ -1,5 +1,6 @@
 "use client";
 
+import { getSettingsForYear, isAutomaticHoliday } from "@/lib/year-settings";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import {
@@ -62,6 +63,13 @@ import {
   signOutFromSupabase,
 } from "@/lib/supabase";
 import type { DailyEntry, MonthlySummary, Screen, Settings } from "@/lib/types";
+
+type DeletedReport = {
+  token: string;
+  userId: string;
+  entry: DailyEntry;
+  savedEntry?: DailyEntry;
+};
 
 const CONFIG_SCREEN_INTENT_KEY = "configuration-screen-intent";
 const CONFIG_SCREEN_FOCUS_TARGET_KEY = "configuration-screen-focus-target";
@@ -153,7 +161,7 @@ type ReportConflict = {
 };
 
 function hasFutureDatedEntries(entries: DailyEntry[], todayDateKey: string) {
-  return entries.some((entry) => entry.date > todayDateKey);
+  return entries.some((entry) => !isAutomaticHoliday(entry) && entry.date > todayDateKey);
 }
 
 function getNewSummaryConflictMonthKeys(
@@ -167,10 +175,10 @@ function getNewSummaryConflictMonthKeys(
       .map((summary) => summary.monthKey),
   );
   const savedEntryMonthKeys = new Set(
-    savedEntries.map((entry) => entry.date.slice(0, 7)),
+    savedEntries.filter((entry) => !isAutomaticHoliday(entry)).map((entry) => entry.date.slice(0, 7)),
   );
   const nextEntryMonthKeys = new Set(
-    nextEntries.map((entry) => entry.date.slice(0, 7)),
+    nextEntries.filter((entry) => !isAutomaticHoliday(entry)).map((entry) => entry.date.slice(0, 7)),
   );
 
   return [...summaryMonthKeys].filter(
@@ -189,7 +197,7 @@ function getEmploymentSummaryConflictMonthKeys(
       .map((summary) => summary.monthKey),
   );
   const nextEntryMonthKeys = new Set(
-    nextEntries.map((entry) => entry.date.slice(0, 7)),
+    nextEntries.filter((entry) => !isAutomaticHoliday(entry)).map((entry) => entry.date.slice(0, 7)),
   );
 
   return [...employmentMonthKeys].filter((monthKey) =>
@@ -267,6 +275,14 @@ export default function Home() {
   const [pendingScreen, setPendingScreen] = useState<Screen | null>(null);
   const [toastErrorMessage, setToastErrorMessage] = useState("");
   const [toastSuccessMessage, setToastSuccessMessage] = useState("");
+  const [deletedReports, setDeletedReports] = useState<DeletedReport[]>([]);
+  const [undoError, setUndoError] = useState("");
+  const sessionUserIdRef = useRef(session?.user.id);
+  useEffect(() => {
+    sessionUserIdRef.current = session?.user.id;
+    setDeletedReports([]);
+    setUndoError("");
+  }, [session?.user.id]);
   const [isSavingReport, setIsSavingReport] = useState(false);
   const [reportConflict, setReportConflict] = useState<ReportConflict | null>(
     null,
@@ -732,44 +748,93 @@ export default function Home() {
     });
   }, []);
 
-  // Deleting a saved day from the list happens right away, version-checked.
-  const handleDeleteSavedEntryImmediately = useCallback(
-    async (dateKey: string) => {
-      const savedEntry = entriesRef.current.find(
-        (entry) => entry.date === dateKey,
-      );
-
-      if (!savedEntry?.updatedAt) {
-        handleRemoveEntryForDate(dateKey);
-        return true;
-      }
-
-      const baseVersion =
-        reportOverlayRef.current.entries[dateKey]?.updatedAt ??
-        savedEntry.updatedAt;
-      const deleteOverlay: ReportOverlay = {
-        entries: {},
-        deletions: {
-          [dateKey]: { id: savedEntry.id, updatedAt: baseVersion },
-        },
-      };
-      const wasDeleted = await persistReportOverlay(deleteOverlay);
-
-      if (wasDeleted) {
-        setReportOverlay((currentOverlay) => {
-          const { [dateKey]: _removedEntry, ...remainingEntries } =
-            currentOverlay.entries;
-          const { [dateKey]: _removedDeletion, ...remainingDeletions } =
-            currentOverlay.deletions;
-          return { entries: remainingEntries, deletions: remainingDeletions };
+  // Keep each deleted report until Undo or dismissal, independently of navigation.
+  const handleDeleteEntryImmediately = useCallback(
+    async (entry: DailyEntry) => {
+      if (saveLockRef.current || !session?.user.id) return false;
+      const userId = session.user.id;
+      const dateKey = entry.date;
+      const savedEntry = entriesRef.current.find((item) => item.date === dateKey);
+      const snapshot: DeletedReport = structuredClone({
+        token: crypto.randomUUID(), userId, entry, savedEntry,
+      });
+      if (savedEntry?.updatedAt) {
+        const baseVersion =
+          reportOverlayRef.current.entries[dateKey]?.updatedAt ?? savedEntry.updatedAt;
+        const wasDeleted = await persistReportOverlay({
+          entries: {},
+          deletions: { [dateKey]: { id: savedEntry.id, updatedAt: baseVersion } },
         });
-        showSuccess("Day deleted.");
+        if (!wasDeleted || sessionUserIdRef.current !== userId) return false;
       }
-
-      return wasDeleted;
+      const currentOverlay = reportOverlayRef.current;
+      const { [dateKey]: _entry, ...remainingEntries } = currentOverlay.entries;
+      const { [dateKey]: _deletion, ...remainingDeletions } = currentOverlay.deletions;
+      const nextOverlay = { entries: remainingEntries, deletions: remainingDeletions };
+      reportOverlayRef.current = nextOverlay;
+      setReportOverlay(nextOverlay);
+      setToastSuccessMessage("");
+      setUndoError("");
+      setDeletedReports((current) => [snapshot, ...current]);
+      return true;
     },
-    [handleRemoveEntryForDate, persistReportOverlay, showSuccess],
+    [persistReportOverlay, session?.user.id],
   );
+
+  const handleUndoDeletedReport = async () => {
+    const deleted = deletedReports[0];
+    if (!deleted || saveLockRef.current || deleted.userId !== session?.user.id) return;
+    const dateKey = deleted.entry.date;
+    // A new local report must not be replaced by an older deleted version.
+    if (entriesRef.current.some((entry) => entry.date === dateKey) ||
+        reportOverlayRef.current.entries[dateKey]) {
+      setUndoError("A report now exists for this date. Undo has not replaced it.");
+      return;
+    }
+
+    saveLockRef.current = true;
+    setIsSavingReport(true);
+    setUndoError("");
+    try {
+      let restored: DailyEntry | undefined;
+      if (deleted.savedEntry) {
+        // Insert-only: another device may have recreated this day since deletion.
+        // The retained token makes a retry safe if the save response is lost.
+        const outcome = await saveDailyEntryRemote(
+          deleted.savedEntry, null, deleted.token,
+        );
+        if (sessionUserIdRef.current !== deleted.userId) return;
+        if (outcome.status !== "saved") {
+          setUndoError("This date changed on another device. Undo has not overwritten it.");
+          return;
+        }
+        restored = outcome.value;
+        const nextEntries = [restored, ...entriesRef.current];
+        entriesRef.current = nextEntries;
+        setEntries(nextEntries);
+      }
+      // Restore any unsaved edits as a draft, preserving all other dates.
+      const currentOverlay = reportOverlayRef.current;
+      const nextOverlay = pruneReportOverlay(entriesRef.current, {
+        entries: {
+          ...currentOverlay.entries,
+          [dateKey]: { ...deleted.entry, updatedAt: restored?.updatedAt },
+        },
+        deletions: currentOverlay.deletions,
+      });
+      reportOverlayRef.current = nextOverlay;
+      setReportOverlay(nextOverlay);
+      setDeletedReports((current) => current.filter((item) => item.token !== deleted.token));
+      showSuccess(deleted.savedEntry ? "Report restored." : "Draft report restored. Save to keep it.");
+    } catch (error) {
+      if (sessionUserIdRef.current === deleted.userId) {
+        setUndoError(getErrorMessage(error, "Could not restore the report. Try Undo again."));
+      }
+    } finally {
+      saveLockRef.current = false;
+      setIsSavingReport(false);
+    }
+  };
 
   const proceedToScreen = (screen: Screen) => {
     if (screen === "daily-log") {
@@ -952,7 +1017,11 @@ export default function Home() {
     setCurrentScreen("configuration");
   }, []);
 
-  const handleAddPreviousMonths = useCallback(() => {
+  const handleAddPreviousMonths = useCallback((monthKey?: string) => {
+    window.sessionStorage.setItem(CONFIG_SCREEN_INTENT_KEY, "update-history");
+    window.sessionStorage.setItem(CONFIG_SCREEN_FOCUS_TARGET_KEY, "add-month");
+    if (monthKey) window.sessionStorage.setItem(CONFIG_SCREEN_TARGET_MONTH_KEY, monthKey);
+    else window.sessionStorage.removeItem(CONFIG_SCREEN_TARGET_MONTH_KEY);
     setBackfillFocusRequest((currentValue) => currentValue + 1);
     setCurrentScreen("configuration");
   }, []);
@@ -995,7 +1064,7 @@ export default function Home() {
       saveLockRef.current = true;
 
       try {
-        if (!isSameSettingsContent(settingsRef.current, nextSettings)) {
+        if (!isSameSettingsContent(getSettingsForYear(settingsRef.current, nextSettings.year ?? new Date().getFullYear()), nextSettings)) {
           const fingerprint = fingerprintOf(["settings", nextSettings]);
           const outcome = await saveSettingsRemote(
             nextSettings,
@@ -1015,6 +1084,9 @@ export default function Home() {
             mutationIdsRef.current.forget(fingerprint);
             settingsRef.current = outcome.value;
             setSettings(outcome.value);
+            const refreshed = await loadRemoteAppData();
+            entriesRef.current = refreshed.entries;
+            setEntries(refreshed.entries);
           }
         }
 
@@ -1219,12 +1291,13 @@ export default function Home() {
   } else if (currentScreen === "daily-log") {
     activeScreen = (
       <DailyLog
+        accountCreatedAt={session?.user.created_at}
         entries={reportEntries}
         fillMissingDayTargetDateKey={fillMissingDayTargetDateKey}
         fillMissingDaysRequest={fillMissingDaysRequest}
         hasUnsavedChanges={hasUnsavedReportChanges}
         isSaving={isSavingReport}
-        onDeleteSavedEntryImmediately={handleDeleteSavedEntryImmediately}
+        onDeleteEntryImmediately={handleDeleteEntryImmediately}
         onRemoveEntryForDate={handleRemoveEntryForDate}
         onRegisterNavigationHandlers={handleRegisterDailyLogNavigationHandlers}
         onSaveEntries={handleSaveReportEntries}
@@ -1242,6 +1315,7 @@ export default function Home() {
   } else {
     activeScreen = (
       <ConfigurationScreen
+        accountCreatedAt={session?.user.created_at}
         backfillFocusRequest={backfillFocusRequest}
         entries={entries}
         settingsFocusRequest={settingsFocusRequest}
@@ -1263,20 +1337,6 @@ export default function Home() {
 
   const isConfigured = hasSupabaseConfig();
   const isDashboardScreen = currentScreen === "dashboard";
-
-  useEffect(() => {
-    if (!toastErrorMessage) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      setToastErrorMessage("");
-    }, 5000);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [toastErrorMessage]);
 
   if (session && isPasswordRecovery) {
     return <><PasswordResetForm
@@ -1398,9 +1458,25 @@ export default function Home() {
         tone="error"
       />
       <Toast
-        message={toastErrorMessage ? "" : toastSuccessMessage}
+        message={toastErrorMessage || deletedReports.length ? "" : toastSuccessMessage}
         onDismiss={() => setToastSuccessMessage("")}
         tone="success"
+      />
+      <Toast
+        persistent
+        message={toastErrorMessage || !deletedReports[0] ? "" :
+          undoError || `Report for ${formatConflictDate(deletedReports[0].entry.date)} deleted.${deletedReports.length > 1 ? ` ${deletedReports.length} deletions can be undone.` : ""}`}
+        tone={undoError ? "error" : "success"}
+        action={{
+          label: isSavingReport ? "Please wait…" : "Undo",
+          disabled: isSavingReport,
+          onClick: () => { void handleUndoDeletedReport(); },
+        }}
+        onDismiss={() => {
+          if (saveLockRef.current) return;
+          setDeletedReports((current) => current.slice(1));
+          setUndoError("");
+        }}
       />
       <WarningModal
         body={

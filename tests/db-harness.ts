@@ -29,7 +29,7 @@ export async function createTestDatabase() {
     insert into auth.users (id) values ('${USER_A}'), ('${USER_B}');
   `)
   await db.exec(readFileSync(`${root}supabase/schema.sql`, 'utf8'))
-  await db.exec(readFileSync(`${root}supabase/migrations/20261028_safe_saving.sql`, 'utf8'))
+  await db.exec(readFileSync(`${root}supabase/migrations/20261028000000_safe_saving.sql`, 'utf8'))
   // Supabase grants table access to authenticated users; RLS then limits rows.
   await db.exec(`
     grant usage on schema public to authenticated, anon;

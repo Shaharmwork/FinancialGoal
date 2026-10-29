@@ -8,6 +8,9 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import { getSettingsForYear, copyYearSettings, getNextBackfillMonthForYear, isAutomaticHoliday } from "@/lib/year-settings";
+import { emptySettings } from "@/lib/default-state";
+import { focusWithinStage } from "@/components/phone-stage";
 import { WarningModal } from "@/components/warning-modal";
 import {
   cx,
@@ -40,6 +43,7 @@ import {
 } from "@/lib/sync";
 import {
   getCurrentYearStats,
+  getEarliestReportingYear,
   getDutchPublicHolidayWeekdays,
   getPlanningConsistency,
 } from "@/lib/calculations";
@@ -77,6 +81,7 @@ export interface ConfigurationNavigationHandlers {
 }
 
 interface ConfigurationProps {
+  accountCreatedAt?: string;
   backfillFocusRequest?: number;
   entries: DailyEntry[];
   settingsFocusRequest?: number;
@@ -200,31 +205,6 @@ function parseMonthKeyParts(monthKey: string) {
     month: monthValue,
     year: yearValue,
   };
-}
-
-function getNextBackfillMonthOption(
-  today: Date,
-  summaries: MonthlySummary[],
-  entryMonthKeys: Set<string>,
-) {
-  const existingSummaryMonthKeys = new Set(
-    summaries
-      .map((summary) => summary.monthKey)
-      .filter((monthKey) => monthKey !== ""),
-  );
-
-  for (let monthIndex = 0; monthIndex < today.getMonth(); monthIndex += 1) {
-    const monthKey = buildMonthKey(today.getFullYear(), monthIndex);
-
-    if (
-      !existingSummaryMonthKeys.has(monthKey) &&
-      !entryMonthKeys.has(monthKey)
-    ) {
-      return monthKey;
-    }
-  }
-
-  return "";
 }
 
 function getMissingBaseConfigurationFields(settings: Settings) {
@@ -613,10 +593,11 @@ function isIncompleteNewSummary(
 }
 
 export function Configuration({
+  accountCreatedAt,
   backfillFocusRequest = 0,
   entries,
   settingsFocusRequest = 0,
-  settings,
+  settings: allSettings,
   monthlySummaries,
   onSaveConfiguration,
   onReloadRemote,
@@ -627,6 +608,11 @@ export function Configuration({
   isSigningOut = false,
   userId,
 }: ConfigurationProps) {
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+  const settings = useMemo(() => getSettingsForYear(allSettings, selectedYear), [allSettings, selectedYear]);
+  const [yearChoiceMade, setYearChoiceMade] = useState<number | null>(null);
+  const [holidayConfirm, setHolidayConfirm] = useState<boolean | null>(null);
+  const vacationBeforeEdit = useRef<number | null>(null);
   const [draftSettings, setDraftSettings] = useState(settings);
   const [draftMonthlySummaries, setDraftMonthlySummaries] = useState(() =>
     sortMonthlySummariesNewestFirst(monthlySummaries),
@@ -663,7 +649,6 @@ export function Configuration({
   const selfEmployedDeductionYesRef = useRef<HTMLButtonElement | null>(null);
   const consumedConfigIntentRef = useRef<string | null>(null);
   const monthCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const monthInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const [pendingMonthFocusRowKey, setPendingMonthFocusRowKey] = useState<
     string | null
   >(null);
@@ -684,6 +669,10 @@ export function Configuration({
     if (!hasHydratedDraftRef.current) {
       hasHydratedDraftRef.current = true;
       const storedDraft = userId ? getUserConfigurationDraft(userId) : null;
+      if (storedDraft?.settings.year) {
+        setSelectedYear(storedDraft.settings.year);
+        setYearChoiceMade(storedDraft.settings.year);
+      }
 
       setDraftSettings(
         storedDraft
@@ -713,24 +702,6 @@ export function Configuration({
     );
   }, [monthlySummaries, settings, userId]);
 
-  useEffect(() => {
-    if (backfillFocusRequest <= 0) {
-      return;
-    }
-
-    backfillSectionRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "start",
-    });
-    const focusTimeoutId = window.setTimeout(() => {
-      addMonthButtonRef.current?.focus();
-    }, 180);
-
-    return () => {
-      window.clearTimeout(focusTimeoutId);
-    };
-  }, [backfillFocusRequest]);
-
   const sortedSavedSummaries = useMemo(
     () => sortMonthlySummariesNewestFirst(monthlySummaries),
     [monthlySummaries],
@@ -739,21 +710,28 @@ export function Configuration({
     () => sortMonthlySummariesNewestFirst(draftMonthlySummaries),
     [draftMonthlySummaries],
   );
+  // Keep original indexes: edits/deletes still address the complete saved history.
+  const visibleDraftSummaries = useMemo(
+    () => sortedDraftSummaries.map((summary, index) => ({ summary, index }))
+      .filter(({ summary }) => !summary.monthKey || summary.monthKey.startsWith(`${selectedYear}-`)),
+    [sortedDraftSummaries, selectedYear],
+  );
   const savedMonthKeys = useMemo(
     () => new Set(sortedSavedSummaries.map((summary) => summary.monthKey)),
     [sortedSavedSummaries],
   );
 
   const entryMonthKeys = useMemo(
-    () => new Set(entries.map((entry) => entry.date.slice(0, 7))),
+    () => new Set(entries.filter((entry) => !isAutomaticHoliday(entry)).map((entry) => entry.date.slice(0, 7))),
     [entries],
   );
+  const earliestReportingYear = getEarliestReportingYear(entries, monthlySummaries, new Date(), accountCreatedAt);
   const planningConsistency = useMemo(
-    () => getPlanningConsistency(draftSettings),
-    [draftSettings],
+    () => getPlanningConsistency(draftSettings, new Date(selectedYear, 0, 1)),
+    [draftSettings, selectedYear],
   );
   const dutchPublicHolidayWeekdays = getDutchPublicHolidayWeekdays(
-    new Date().getFullYear(),
+    selectedYear,
   ).length;
   const plannedVacationDaysPerYear = draftSettings.vacationDaysPerYear ?? 0;
 
@@ -794,6 +772,13 @@ export function Configuration({
         };
       }
 
+      if (parsedMonthKey.year < earliestReportingYear) {
+        return {
+          title: "Year outside your reporting history",
+          message: `Your reporting history starts in ${earliestReportingYear}. Choose that year or later.`,
+        };
+      }
+
       const duplicateIndex = sortedDraftSummaries.findIndex(
         (summary, summaryIndex) =>
           summaryIndex !== indexToIgnore && summary.monthKey === monthKey,
@@ -816,7 +801,7 @@ export function Configuration({
 
       return null;
     },
-    [entryMonthKeys, sortedDraftSummaries],
+    [earliestReportingYear, entryMonthKeys, sortedDraftSummaries],
   );
 
   useEffect(() => {
@@ -824,34 +809,21 @@ export function Configuration({
       return;
     }
 
-    const focusTarget = monthInputRefs.current[pendingMonthFocusRowKey];
     const cardTarget = monthCardRefs.current[pendingMonthFocusRowKey];
-
-    if (!focusTarget) {
+    const focusedMonthKey = pendingMonthFocusRowKey.slice(0, pendingMonthFocusRowKey.lastIndexOf("-"));
+    if (!expandedMonthKeys.has(focusedMonthKey)) {
+      setExpandedMonthKeys((currentValue) => new Set(currentValue).add(focusedMonthKey));
       return;
     }
-
-    cardTarget?.scrollIntoView({
-      behavior: "smooth",
-      block: "center",
+    const focusTarget = cardTarget?.querySelector<HTMLInputElement>("[data-month-label]")
+      ?? cardTarget?.querySelector<HTMLInputElement>("input:not([disabled]):not([type=month])");
+    if (!focusTarget || !cardTarget) return;
+    const frame = window.requestAnimationFrame(() => {
+      focusWithinStage(focusTarget, cardTarget);
+      setPendingMonthFocusRowKey(null);
     });
-    focusTarget.focus();
-    const focusedMonthKey = pendingMonthFocusRowKey.slice(
-      0,
-      pendingMonthFocusRowKey.lastIndexOf("-"),
-    );
-    setExpandedMonthKeys((currentValue) => new Set(currentValue).add(focusedMonthKey));
-    setPendingMonthFocusRowKey(null);
-  }, [pendingMonthFocusRowKey, sortedDraftSummaries]);
-
-  useEffect(() => {
-    if (!formMessage || isErrorMessage) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => setFormMessage(""), 3500);
-    return () => window.clearTimeout(timeoutId);
-  }, [formMessage, isErrorMessage]);
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingMonthFocusRowKey, sortedDraftSummaries, expandedMonthKeys, selectedYear]);
 
   const resetFormMessage = () => {
     if (!formMessage && !isErrorMessage) {
@@ -971,6 +943,11 @@ export function Configuration({
     if (key === "monthKey") {
       const normalizedMonthKey =
         typeof value === "string" ? value : String(value);
+      if (normalizedMonthKey && Number(normalizedMonthKey.slice(0, 4)) !== selectedYear) {
+        showWarningModal({ title: "Choose a month in this year",
+          message: `Choose a month in ${selectedYear}. To add another year's month, save or discard these changes and switch the configuration year.` });
+        return;
+      }
       const validationIssue = getMonthValidationIssue({
         includeDailyEntryConflict: false,
         indexToIgnore: index,
@@ -1046,7 +1023,7 @@ export function Configuration({
   const addWorkLine = (summaryIndex: number) => {
     updateSummaryWorkLines(summaryIndex, (workLines) => [
       ...workLines,
-      createEmptyWorkLine(draftSettings),
+      createEmptyWorkLine(getSettingsForYear(draftSettings, Number(sortedDraftSummaries[summaryIndex].monthKey.slice(0, 4)))),
     ]);
   };
 
@@ -1128,13 +1105,13 @@ export function Configuration({
 
     const nextMonthKey =
       normalizedTargetMonthKey ||
-      getNextBackfillMonthOption(new Date(), sortedDraftSummaries, entryMonthKeys);
+      getNextBackfillMonthForYear(selectedYear, new Date(), sortedDraftSummaries, entryMonthKeys);
 
     if (!nextMonthKey) {
       const noAvailableMonthIssue = {
         title: "No month available to add",
         message:
-          "All eligible months in the current year are already covered or already have detailed daily reports.",
+          `There are no completed months available to add in ${selectedYear}. Existing month totals and months with detailed reports are excluded.`,
       };
       showWarningModal(noAvailableMonthIssue);
       return;
@@ -1157,7 +1134,7 @@ export function Configuration({
       monthKey: nextMonthKey,
       monthType: "business",
       invoicedIncome: 0,
-      workLines: [createEmptyWorkLine(draftSettings)],
+      workLines: [createEmptyWorkLine(getSettingsForYear(draftSettings, Number(nextMonthKey.slice(0, 4))))],
       expenses: 0,
       hours: 0,
       grossSalary: null,
@@ -1179,6 +1156,7 @@ export function Configuration({
     setPendingMonthFocusRowKey(nextFocusRowKey);
   }, [
     draftSettings,
+    selectedYear,
     entryMonthKeys,
     getMonthValidationIssue,
     refreshInvalidSummaryFieldsIfVisible,
@@ -1198,11 +1176,31 @@ export function Configuration({
       CONFIG_SCREEN_TARGET_MONTH_KEY,
     );
 
-    if (!intent || consumedConfigIntentRef.current === intent) {
+    const intentKey = `${intent}:${backfillFocusRequest}`;
+    if (!intent || consumedConfigIntentRef.current === intentKey) {
       return;
     }
 
-    consumedConfigIntentRef.current = intent;
+    if (intent === "update-history" && focusTarget === "add-month") {
+      const targetYear = targetMonthKey && /^\d{4}-\d{2}$/.test(targetMonthKey)
+        ? Number(targetMonthKey.slice(0, 4)) : new Date().getFullYear();
+      if (targetYear !== selectedYear) {
+        if (hasPendingChanges) {
+          consumedConfigIntentRef.current = intentKey;
+          window.sessionStorage.removeItem(CONFIG_SCREEN_INTENT_KEY);
+          window.sessionStorage.removeItem(CONFIG_SCREEN_FOCUS_TARGET_KEY);
+          window.sessionStorage.removeItem(CONFIG_SCREEN_TARGET_MONTH_KEY);
+          showWarningModal({ title: "Save or discard first",
+            message: "Keep or discard this year's changes before opening a month in another year." });
+          return;
+        }
+        setSelectedYear(targetYear);
+        setDraftSettings(getSettingsForYear(allSettings, targetYear));
+        setYearChoiceMade(null);
+        return; // Consume the shortcut after the matching year has rendered.
+      }
+    }
+    consumedConfigIntentRef.current = intentKey;
     window.sessionStorage.removeItem(CONFIG_SCREEN_INTENT_KEY);
     window.sessionStorage.removeItem(CONFIG_SCREEN_FOCUS_TARGET_KEY);
     window.sessionStorage.removeItem(CONFIG_SCREEN_TARGET_MONTH_KEY);
@@ -1216,17 +1214,14 @@ export function Configuration({
     }
 
     if (intent === "update-history" && focusTarget === "add-month") {
-      backfillSectionRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-
-      window.setTimeout(() => {
-        addMonthSummary(targetMonthKey ?? undefined);
-      }, 180);
+      addMonthSummary(targetMonthKey ?? undefined);
     }
   }, [
     addMonthSummary,
+    allSettings,
+    selectedYear,
+    hasPendingChanges,
+    backfillFocusRequest,
     focusFirstMissingConfigurationField,
     hasHydratedConfigurationDraft,
   ]);
@@ -1345,7 +1340,7 @@ export function Configuration({
       );
 
       if (result.status === "saved") {
-        setDraftSettings(result.settings);
+        setDraftSettings(getSettingsForYear(result.settings, nextSettings.year ?? new Date().getFullYear()));
         setDraftMonthlySummaries(sortMonthlySummariesNewestFirst(result.monthlySummaries));
 
         if (userId) {
@@ -1384,7 +1379,7 @@ export function Configuration({
     }
 
     if (conflict.target.kind === "settings") {
-      setDraftSettings(latest.settings);
+      setDraftSettings(getSettingsForYear(latest.settings, selectedYear));
     } else {
       const { monthKey } = conflict.target;
       const remoteSummary = latest.monthlySummaries.find(
@@ -1450,8 +1445,11 @@ export function Configuration({
       return true;
     }
 
+    // Editing historical reports alone does not require inventing a plan for that year.
     const { missingFieldKeys, missingFields } =
-      getMissingBaseConfigurationFields(draftSettings);
+      !isSameSettingsContent(draftSettings, settings)
+        ? getMissingBaseConfigurationFields(draftSettings)
+        : { missingFieldKeys: [], missingFields: [] };
     const nextInvalidSummaryFields =
       getInvalidSummaryFieldMap(sortedDraftSummaries);
     const incompleteSummaryRowKeys = Object.keys(nextInvalidSummaryFields);
@@ -1584,9 +1582,11 @@ export function Configuration({
   }, [
     performSave,
     draftSettings,
+    selectedYear,
     entryMonthKeys,
     getMonthValidationIssue,
     hasPendingChanges,
+    settings,
     onSaveConfiguration,
     sortedDraftSummaries,
     userId,
@@ -1630,7 +1630,7 @@ export function Configuration({
     (draftSettings.defaultShiftIncome ?? 0) > 0 && (draftSettings.defaultShiftHours ?? 0) > 0
       ? (draftSettings.defaultShiftIncome ?? 0) / (draftSettings.defaultShiftHours ?? 1)
       : 0;
-  const yearHours = getCurrentYearStats(entries, monthlySummaries, draftSettings).ytdHours;
+  const yearHours = getCurrentYearStats(entries, monthlySummaries, draftSettings, selectedYear === new Date().getFullYear() ? new Date() : new Date(selectedYear, 11, 31)).ytdHours;
   const hoursRuleProgress = Math.min(100, (yearHours / HOURS_RULE) * 100);
   const isToastError = isErrorMessage && warningModalIssue === null;
 
@@ -1654,8 +1654,45 @@ export function Configuration({
     });
   };
 
+  const knownYears = [...new Set([...Object.keys(allSettings.yearlySettings ?? {}).map(Number), ...((allSettings.targetNetMonth ?? 0) > 0 ? [allSettings.year ?? 2026] : [])])];
+  const previousConfiguredYear = knownYears.filter((year) => year < selectedYear).sort((a, b) => b - a)[0];
+  const needsYearChoice = !allSettings.yearlySettings?.[String(selectedYear)] &&
+    !((allSettings.year ?? 2026) === selectedYear && (allSettings.targetNetMonth ?? 0) > 0) && yearChoiceMade !== selectedYear;
+  const changeYear = (year: number) => {
+    if (hasPendingChanges) {
+      showWarningModal({ title: "Save or discard first", message: "Keep or discard this year's changes before switching years." });
+      return;
+    }
+    setSelectedYear(year);
+    setDraftSettings(getSettingsForYear(allSettings, year));
+    setYearChoiceMade(null);
+  };
+  const confirmHolidays = () => {
+    if (holidayConfirm === null) return;
+    const total = draftSettings.vacationDaysPerYear ?? 0;
+    const added = draftSettings.holidayDaysAdded ?? 0;
+    setDraftSettings({ ...draftSettings,
+      dutchHolidaysEnabled: holidayConfirm,
+      holidayDaysAdded: holidayConfirm ? dutchPublicHolidayWeekdays : 0,
+      vacationDaysPerYear: holidayConfirm ? total + dutchPublicHolidayWeekdays : Math.max(0, total - added),
+    });
+    setHolidayConfirm(null);
+  };
+
   return (
     <>
+      <WarningModal
+        isOpen={holidayConfirm !== null}
+        title={holidayConfirm ? `Approve Dutch holidays for ${selectedYear}?` : `Remove automatic holidays for ${selectedYear}?`}
+        body={holidayConfirm
+          ? `On Save, add ${dutchPublicHolidayWeekdays} weekday holidays to planned days off and mark empty holiday dates as vacation. Existing work, expenses and your own vacation reports stay unchanged. This runs once; you can edit or remove each mark afterward.`
+          : "On Save, remove only untouched vacation marks created by this toggle, and subtract the approved holiday allowance from planned days off (down to zero). Your own reports and edited marks stay."}
+        onClose={() => setHolidayConfirm(null)}
+        onPrimaryAction={confirmHolidays}
+        onSecondaryAction={() => setHolidayConfirm(null)}
+        primaryActionLabel={holidayConfirm ? "Approve holidays" : "Turn off holidays"}
+        secondaryActionLabel="Cancel"
+      />
       <WarningModal
         body={warningModalIssue?.message ?? ""}
         isOpen={warningModalIssue !== null}
@@ -1757,6 +1794,31 @@ export function Configuration({
           }
         />
 
+        <Panel title="Configuration year">
+          <label className="block text-sm text-[#ead7bd]">
+            Year
+            <select className={inputClassName(false, "mt-2")} value={selectedYear}
+              disabled={isSaving} onChange={(event) => changeYear(Number(event.target.value))}>
+              {Array.from({length: new Date().getFullYear() + 2 - Math.min(earliestReportingYear, ...knownYears)}, (_, i) => Math.min(earliestReportingYear, ...knownYears) + i)
+                .map((year) => <option key={year} value={year}>{year}</option>)}
+            </select>
+          </label>
+          <p className="mt-2 text-xs text-[#c9a57f]">Goals, rates, days off and deduction choices are saved separately for each year. The dashboard uses the current year.</p>
+          {needsYearChoice ? <div className="mt-3 space-y-3">
+            <p className="text-sm">How would you like to set up {selectedYear}?</p>
+            {previousConfiguredYear !== undefined ? <GoldButton onClick={() => {
+              setDraftSettings(copyYearSettings(allSettings, previousConfiguredYear, selectedYear));
+              setYearChoiceMade(selectedYear);
+            }}>Copy {previousConfiguredYear} and edit</GoldButton> : null}
+            <GhostButton onClick={() => {
+              setDraftSettings({...emptySettings, year: selectedYear, yearlySettings: allSettings.yearlySettings, updatedAt: allSettings.updatedAt});
+              setYearChoiceMade(selectedYear);
+            }}>Start blank</GhostButton>
+            <p className="text-xs text-[#c9a57f]">Copying keeps your non-holiday days off. Dutch holidays need fresh approval.</p>
+          </div> : null}
+        </Panel>
+
+        <fieldset disabled={isSaving || needsYearChoice} className="space-y-4">
         <Panel
           icon={CompassIcon}
           panelRef={settingsSectionRef}
@@ -1799,17 +1861,42 @@ export function Configuration({
                 disabled={isSaving}
                 info={{
                   title: "Planned vacation days per year",
-                  body: `Days off you plan this year. They lower the hours you can realistically work in the planning check. NL ${new Date().getFullYear()} has ${dutchPublicHolidayWeekdays} public holidays on weekdays.`,
+                  body: `Days off you plan this year. They lower the hours you can realistically work in the planning check. This total includes any Dutch holidays you approve below. Vacation reports and this planned total are separately editable.`,
                 }}
                 inputRef={vacationDaysPerYearRef}
                 invalid={invalidSettingFields.vacationDaysPerYear === true}
                 label="Planned days off / year"
+                onFocus={() => { vacationBeforeEdit.current = draftSettings.vacationDaysPerYear; }}
+                onBlur={() => {
+                  if (draftSettings.dutchHolidaysEnabled &&
+                    (draftSettings.vacationDaysPerYear ?? 0) < (vacationBeforeEdit.current ?? 0)) {
+                    showWarningModal({title: "Holiday marks are still in your reports",
+                      message: "Reducing or clearing planned days off changes the yearly working-days calculation but does not remove approved holiday vacation marks. Your plan may no longer match your calendar. Turn Dutch holidays off to remove untouched automatic marks, or edit individual dates in Report."});
+                  }
+                }}
                 onChange={(value) => updateField("vacationDaysPerYear", value)}
                 placeholder="0"
                 step={1}
                 value={draftSettings.vacationDaysPerYear}
               />
             </div>
+
+            <label className="flex items-start gap-3 rounded-xl border border-[#a8744a]/40 p-3 text-sm">
+              <input type="checkbox" className="mt-1" checked={draftSettings.dutchHolidaysEnabled === true}
+                disabled={isSaving} onChange={(event) => setHolidayConfirm(event.target.checked)} />
+              <span>Use Dutch public holidays as days off for {selectedYear}
+                <span className="mt-1 block text-xs text-[#c9a57f]">{dutchPublicHolidayWeekdays} weekday holidays. Approval takes effect when you save. You can add extra days off above.</span>
+              </span>
+            </label>
+            <details className="text-xs text-[#c9a57f]">
+              <summary className="cursor-pointer">View the {dutchPublicHolidayWeekdays} weekday holiday dates</summary>
+              <ul className="mt-2 space-y-1">
+                {getDutchPublicHolidayWeekdays(selectedYear).map((day) => <li key={day.toISOString()}>
+                  {day.toLocaleDateString("en-GB", {weekday: "long", day: "numeric", month: "long", year: "numeric"})}
+                </li>)}
+              </ul>
+            </details>
+            {draftSettings.dutchHolidaysEnabled ? <p className="text-xs text-[#c9a57f]">Holiday vacation marks are editable in Report. Removing one does not automatically recreate it or change the planned total.</p> : null}
 
             {planningConsistency ? (
               <Notice
@@ -1820,7 +1907,7 @@ export function Configuration({
                 }
                 tone={planningConsistency.difference < 0 ? "warn" : "info"}
               >
-                Working {formatHours(planningConsistency.plannedYearlyHours)} this year (
+                Working {formatHours(planningConsistency.plannedYearlyHours)} in {selectedYear} (
                 {plannedVacationDaysPerYear} vacation days) at your default rate gives about{" "}
                 {formatCurrency(planningConsistency.projectedAnnualNet)} after tax, against a goal of{" "}
                 {formatCurrency(planningConsistency.targetAnnualNet)}.
@@ -1882,8 +1969,8 @@ export function Configuration({
           title="Tax"
         >
           <div className="space-y-5">
-            {!isSupportedTaxYear(new Date().getFullYear()) ? (
-              <Notice title={`No tax rules for ${new Date().getFullYear()} yet`} tone="warn">
+            {!isSupportedTaxYear(selectedYear) ? (
+              <Notice title={`No tax rules for ${selectedYear} yet`} tone="warn">
                 The app only has the {SUPPORTED_TAX_YEAR} tax rules, so it shows no tax
                 estimates for this year. Your hours, income and past months still work.
               </Notice>
@@ -1904,7 +1991,7 @@ export function Configuration({
             <div>
               <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
                 <span className="font-semibold uppercase tracking-[0.12em] text-[#c9a57f]">
-                  Hours this year
+                  Hours in {selectedYear}
                 </span>
                 <span
                   className={
@@ -1981,15 +2068,17 @@ export function Configuration({
           </div>
         </Panel>
 
+        </fieldset>
+
         <Panel
           icon={CalendarSaveIcon}
           panelRef={backfillSectionRef}
-          subtitle="Whole months you didn't report day by day."
-          title="Past months"
+          subtitle={`Whole months in ${selectedYear} you did not report day by day.`}
+          title={`Past months · ${selectedYear}`}
           titleAction={
             <GoldButton
               buttonRef={addMonthButtonRef}
-              disabled={isSaving}
+              disabled={isSaving || selectedYear > new Date().getFullYear()}
               onClick={() => addMonthSummary()}
               size="sm"
             >
@@ -1997,13 +2086,15 @@ export function Configuration({
             </GoldButton>
           }
         >
-          {sortedDraftSummaries.length === 0 ? (
+          {visibleDraftSummaries.length === 0 ? (
             <p className="py-3 text-center text-sm text-[#a88c71]">
-              No month totals yet. Add months you worked before you started reporting daily.
+              {selectedYear > new Date().getFullYear()
+                ? `No reports for ${selectedYear} yet. You can add month totals once that year begins.`
+                : `No month totals for ${selectedYear} yet. Add months you worked before you started reporting daily.`}
             </p>
           ) : (
             <div className="space-y-2.5">
-              {sortedDraftSummaries.map((summary, index) => {
+              {visibleDraftSummaries.map(({ summary, index }) => {
                 const rowKey = getSummaryRowKey(summary, index);
                 const rowInvalidFields = invalidSummaryFields[rowKey] ?? {};
                 const isInvalidSummaryRow = Object.keys(rowInvalidFields).length > 0;
@@ -2028,6 +2119,11 @@ export function Configuration({
                           : "border-[#8a603d]/35 bg-[#120d0a]/80",
                     )}
                   >
+                    {Number(summary.monthKey.slice(0, 4)) < new Date().getFullYear() && isExpanded ? (
+                      <p className="px-3.5 pt-3 text-xs text-[#c9a57f]">
+                        This month belongs to {summary.monthKey.slice(0, 4)} and does not change the current year's dashboard.
+                      </p>
+                    ) : null}
                     <button
                       aria-expanded={isExpanded}
                       className="flex w-full items-center gap-3 px-3.5 py-3 text-left"
@@ -2069,9 +2165,6 @@ export function Configuration({
                           <label className="block min-w-0">
                             <FieldLabel>Month</FieldLabel>
                             <input
-                              ref={(node) => {
-                                monthInputRefs.current[rowKey] = node;
-                              }}
                               className={inputClassName(rowInvalidFields.monthKey === true)}
                               disabled={isSaving || isSavedMonth}
                               title={
@@ -2080,6 +2173,9 @@ export function Configuration({
                                   : undefined
                               }
                               type="month"
+                              min={`${selectedYear}-01`}
+                              max={selectedYear === new Date().getFullYear()
+                                ? buildMonthKey(selectedYear, new Date().getMonth()) : `${selectedYear}-12`}
                               value={summary.monthKey}
                               onChange={(event) =>
                                 updateSummaryField(index, "monthKey", event.target.value)
@@ -2191,6 +2287,7 @@ export function Configuration({
                                         <label className="block min-w-0 flex-1">
                                           <FieldLabel>Label · optional</FieldLabel>
                                           <input
+                                            data-month-label
                                             className={inputClassName(false, "py-2.5")}
                                             disabled={isSaving}
                                             placeholder="e.g. Handyman"
