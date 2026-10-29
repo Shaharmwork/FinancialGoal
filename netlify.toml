@@ -9,7 +9,13 @@
 # Only these two public values are needed in Netlify's environment settings:
 #   NEXT_PUBLIC_SUPABASE_URL
 #   NEXT_PUBLIC_SUPABASE_ANON_KEY
-# Never add a service-role key: everything here is shipped to the browser.
+# Server-only alert credentials go in Netlify environment settings, never NEXT_PUBLIC_*:
+#   SUPABASE_SERVICE_ROLE_KEY
+#   ALERT_SMTP_PASSWORD (Gmail app password)
+# Keep these out of client code and netlify.toml.
+
+[functions."registration-alerts"]
+  schedule = "*/5 * * * *"
 
 [[headers]]
   for = "/*"
