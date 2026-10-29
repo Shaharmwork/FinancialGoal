@@ -13,6 +13,8 @@ import {
   type DailyLogNavigationHandlers,
 } from "@/components/daily-log";
 import { Dashboard } from "@/components/dashboard";
+import { PublicLanding } from "@/components/public-landing";
+import { getPublicEntryMode } from "@/lib/public-entry";
 import { LoginForm, PasswordResetForm } from "@/components/login-form";
 import { Onboarding } from "@/components/onboarding";
 import { PhoneStage } from "@/components/phone-stage";
@@ -251,6 +253,7 @@ export default function Home() {
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [isPasswordRecovery, setIsPasswordRecovery] = useState(false);
   const [authLinkError, setAuthLinkError] = useState("");
+  const [entryMode, setEntryMode] = useState<"signin" | "signup" | null>(null);
 
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [isSignOutConfirmOpen, setIsSignOutConfirmOpen] = useState(false);
@@ -336,6 +339,7 @@ export default function Home() {
     let isActive = true;
     let hasResolvedSession = false;
     const callbackUrl = new URL(window.location.href);
+    setEntryMode(getPublicEntryMode(callbackUrl));
     const hash = new URLSearchParams(callbackUrl.hash.slice(1));
     if (hash.has("error") || callbackUrl.searchParams.has("error")) {
       setAuthLinkError("This email link has expired or is invalid. Try signing in to continue email confirmation, or choose Forgot password for a new reset link.");
@@ -1363,6 +1367,10 @@ export default function Home() {
     /><Toast message={toastErrorMessage} onDismiss={() => setToastErrorMessage("")} tone="error" /></>;
   }
 
+  if (!session && !entryMode && !authLinkError) {
+    return <><PublicLanding /><Toast message={toastErrorMessage} onDismiss={() => setToastErrorMessage("")} tone="error" /></>;
+  }
+
   if (!session) {
     return (
       <div className="relative isolate min-h-screen overflow-x-hidden text-foreground">
@@ -1374,11 +1382,13 @@ export default function Home() {
           ) : null}
           <section className="w-full">
             <LoginForm
+              initialMode={entryMode ?? "signin"}
               isBusy={isSigningIn || !hasCheckedSession}
               isConfigured={isConfigured}
               onSubmit={handleSignIn}
               linkError={authLinkError}
             />
+            <a href="/" className="mt-6 block text-center text-sm text-[#c9af91] underline underline-offset-4">About Financial Goal</a>
           </section>
         </main>
         <Toast

@@ -9,14 +9,15 @@ import OwlIcon from '@/src/assets/web/icons/Owlicon.png'
 
 type Mode = 'signin' | 'signup' | 'confirm' | 'forgot'
 interface LoginFormProps {
+  initialMode?: 'signin' | 'signup'
   isBusy: boolean
   isConfigured: boolean
   onSubmit: (email: string, password: string) => Promise<void | "confirmation-required">
   linkError?: string
 }
 
-export function LoginForm({ isBusy, isConfigured, onSubmit, linkError = '' }: LoginFormProps) {
-  const [mode, setMode] = useState<Mode>('signin')
+export function LoginForm({ initialMode = 'signin', isBusy, isConfigured, onSubmit, linkError = '' }: LoginFormProps) {
+  const [mode, setMode] = useState<Mode>(initialMode)
   const [email, setEmail] = useState('')
   const [name, setName] = useState('')
   const [password, setPassword] = useState('')
